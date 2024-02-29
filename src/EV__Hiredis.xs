@@ -187,8 +187,9 @@ static void EV__hiredis_reply_cb(redisAsyncContext* c, void* reply, void* privda
     cbt      = (ev_hiredis_cb_t*)privdata;
 
     if (NULL == reply) {
-        fprintf(stderr, "here error: %s\n", c->errstr);
-
+        if (c->err != REDIS_ERR_TIMEOUT) {
+            fprintf(stderr, "here error: %s\n", c->errstr);
+        }
         dSP;
 
         ENTER;
