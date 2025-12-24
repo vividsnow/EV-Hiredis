@@ -20,6 +20,7 @@ typedef struct redisLibevEvents {
     int reading, writing, timing;
     ev_io rev, wev;
     ev_timer timer;
+    int priority;
 } redisLibevEvents;
 
 static void redisLibevReadEvent(EV_P_ ev_io *watcher, int revents) {
@@ -137,6 +138,8 @@ static int redisLibevAttach(EV_P_ redisAsyncContext *ac) {
 
     /* Create container for context and r/w events */
     e = (redisLibevEvents*)malloc(sizeof(*e));
+    if (e == NULL)
+        return REDIS_ERR;
     e->context = ac;
 #if EV_MULTIPLICITY
     e->loop = loop;
@@ -144,6 +147,7 @@ static int redisLibevAttach(EV_P_ redisAsyncContext *ac) {
     e->loop = NULL;
 #endif
     e->reading = e->writing = e->timing = 0;
+    e->priority = 0;
     e->rev.data = (SV*)e;
     e->wev.data = (SV*)e;
 
@@ -160,6 +164,47 @@ static int redisLibevAttach(EV_P_ redisAsyncContext *ac) {
     ev_io_init(&e->rev,redisLibevReadEvent,c->fd,EV_READ);
     ev_io_init(&e->wev,redisLibevWriteEvent,c->fd,EV_WRITE);
     return REDIS_OK;
+}
+
+static void redisLibevSetPriority(redisAsyncContext *ac, int priority) {
+    redisLibevEvents *e = (redisLibevEvents*)ac->ev.data;
+    struct ev_loop *loop;
+    if (e == NULL) return;
+
+    loop = e->loop;
+    ((void)loop);
+    e->priority = priority;
+
+    /* Stop watchers, set priority, restart if they were running */
+    if (e->reading) {
+        ev_io_stop(loop, &e->rev);
+        ev_set_priority(&e->rev, priority);
+        ev_io_start(loop, &e->rev);
+    } else {
+        ev_set_priority(&e->rev, priority);
+    }
+
+    if (e->writing) {
+        ev_io_stop(loop, &e->wev);
+        ev_set_priority(&e->wev, priority);
+        ev_io_start(loop, &e->wev);
+    } else {
+        ev_set_priority(&e->wev, priority);
+    }
+
+    if (e->timing) {
+        ev_timer_stop(loop, &e->timer);
+        ev_set_priority(&e->timer, priority);
+        ev_timer_start(loop, &e->timer);
+    } else {
+        ev_set_priority(&e->timer, priority);
+    }
+}
+
+static int redisLibevGetPriority(redisAsyncContext *ac) {
+    redisLibevEvents *e = (redisLibevEvents*)ac->ev.data;
+    if (e == NULL) return 0;
+    return e->priority;
 }
 
 #endif
