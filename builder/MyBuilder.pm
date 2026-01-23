@@ -30,7 +30,10 @@ sub new {
         $make = $Config{make};
     }
 
-    $self->do_system($make, '-C', 'deps/hiredis', 'static');
+    my $result = $self->do_system($make, '-C', 'deps/hiredis', 'static');
+    unless ($result) {
+        die "Failed to build hiredis static library. Check that you have a C compiler installed.\n";
+    }
     return $self;
 }
 

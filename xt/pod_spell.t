@@ -19,3 +19,5 @@ hiredis
 str
 utf-8
 backend
+reconnection
+libev
