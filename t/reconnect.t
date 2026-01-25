@@ -351,7 +351,7 @@ use EV::Hiredis;
     $r->disconnect;
 }
 
-# Test: reconnect_delay with zero/negative values defaults to 1000ms
+# Test: reconnect_delay with zero value defaults to 1000ms
 {
     my $r = EV::Hiredis->new(path => $connect_info{sock});
 
@@ -359,12 +359,22 @@ use EV::Hiredis;
     $r->reconnect(1, 0, 3);
     is $r->reconnect_enabled, 1, 'reconnect enabled with zero delay';
 
-    # Negative delay should also be clamped to 1000ms
-    $r->reconnect(1, -100, 3);
-    is $r->reconnect_enabled, 1, 'reconnect enabled with negative delay';
+    $r->disconnect;
+}
 
-    # The actual delay value is internal and not exposed via API,
-    # but the reconnect should still work without crashing
+# Test: reconnect_delay with negative value throws exception
+{
+    my $r = EV::Hiredis->new(path => $connect_info{sock});
+
+    my $died = 0;
+    eval {
+        $r->reconnect(1, -100, 3);
+    };
+    $died = 1 if $@;
+
+    ok $died, 'negative reconnect_delay throws exception';
+    like $@, qr/reconnect_delay must be non-negative/, 'exception mentions non-negative';
+
     $r->disconnect;
 }
 

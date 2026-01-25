@@ -1194,6 +1194,9 @@ void
 reconnect(EV::Hiredis self, int enable, int delay_ms = 1000, int max_attempts = 0);
 CODE:
 {
+    if (delay_ms < 0) {
+        croak("reconnect_delay must be non-negative");
+    }
     if (delay_ms > MAX_TIMEOUT_MS) {
         croak("reconnect_delay too large (max %d ms)", MAX_TIMEOUT_MS);
     }
