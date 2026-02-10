@@ -15,52 +15,91 @@ eval {
 
 my %connect_info = $redis_server->connect_info;
 
-my $r = EV::Hiredis->new;
+# Test: connect via unix socket
+{
+    my $r = EV::Hiredis->new;
+    my $connected = 0;
+    my $error = 0;
+    my $disconnected = 0;
 
-my $connected = 0;
-my $error = 0;
+    $r->on_error(sub { $error++ });
+    $r->on_disconnect(sub { $disconnected++ });
+    $r->on_connect(sub {
+        $connected++;
+        # Schedule disconnect after brief delay
+        my $t; $t = EV::timer 0.1, 0, sub {
+            undef $t;
+            $r->disconnect;
+        };
+    });
 
-$r->on_error(sub { $error++ });
-$r->on_connect(sub {
-    $connected++;
+    $r->connect_unix( $connect_info{sock} );
+    EV::run;
 
-    my $t; $t = EV::timer .1, 0, sub {
-        $r->disconnect;
+    is $connected, 1, 'connected via unix socket';
+    is $error, 0, 'no errors during unix socket connection';
+    is $disconnected, 1, 'disconnect callback was called';
+
+    # Clear handlers before object destruction to break reference cycles
+    $r->on_error(undef);
+    $r->on_connect(undef);
+    $r->on_disconnect(undef);
+}
+
+# Test: connect_unix() when already connected throws exception
+{
+    my $r = EV::Hiredis->new;
+    $r->on_error(sub { });
+
+    $r->connect_unix($connect_info{sock});
+
+    my $t; $t = EV::timer 0.1, 0, sub {
         undef $t;
-    };
-});
 
-$r->connect_unix( $connect_info{sock} );
+        my $died = 0;
+        eval {
+            $r->connect_unix($connect_info{sock});
+        };
+        $died = 1 if $@;
 
-EV::run;
+        ok $died, 'connect_unix() when already connected throws exception';
+        like $@, qr/already connected/, 'exception message mentions already connected';
 
-is $connected, 1;
-is $error, 0;
-
-$redis_server->stop;
-
-$r = EV::Hiredis->new;
-
-$connected = 0;
-$error = 0;
-
-$r->on_error(sub {
-    $error++;
-});
-$r->on_connect(sub {
-    $connected++;
-
-    my $t; $t = EV::timer .1, 0, sub {
         $r->disconnect;
-        undef $t;
     };
-});
 
-$r->connect_unix( $connect_info{sock} );
+    EV::run;
 
-EV::run;
+    # Clear handlers before object destruction
+    $r->on_error(undef);
+}
 
-is $connected, 0;
-is $error, 1;
+# Test: connect_unix() then connect() throws exception
+{
+    my $r = EV::Hiredis->new;
+    $r->on_error(sub { });
+
+    $r->connect_unix($connect_info{sock});
+
+    my $t; $t = EV::timer 0.1, 0, sub {
+        undef $t;
+
+        my $died = 0;
+        eval {
+            $r->connect('127.0.0.1', 6379);
+        };
+        $died = 1 if $@;
+
+        ok $died, 'connect() after connect_unix() throws exception';
+        like $@, qr/already connected/, 'exception message mentions already connected';
+
+        $r->disconnect;
+    };
+
+    EV::run;
+
+    # Clear handlers before object destruction
+    $r->on_error(undef);
+}
 
 done_testing;

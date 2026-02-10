@@ -60,8 +60,7 @@ jobs:
               '5.20',
               '5.18',
               '5.16',
-              '5.14',
-              '5.12'
+              '5.14'
           ]
           redis = [
               '7.0',
@@ -120,3 +119,48 @@ jobs:
       - name: Test
         run: |
           minil test --norelease --noauthor --noautomated
+
+  test-freebsd:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Test on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y perl5 gmake pkgconf openssl redis
+            pkg install -y p5-App-cpanminus p5-EV p5-Module-Build-XSUtil p5-File-Which p5-Test-Deep p5-Test-TCP
+            cpanm -n Test::RedisServer Devel::Refcount
+          run: |
+            export PATH="/usr/local/sbin:/usr/local/bin:$PATH"
+            which redis-server || echo "redis-server not found in PATH=$PATH"
+            perl Build.PL && ./Build && ./Build test
+
+  test-openbsd:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Test on OpenBSD
+        uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg_add gmake pkgconf redis curl
+            pkg_add p5-EV
+            curl -L https://cpanmin.us | perl - App::cpanminus
+            cpanm -n Module::Build::XSUtil File::Which Test::Deep Test::TCP Test::RedisServer Devel::Refcount
+          run: |
+            export PATH="/usr/local/sbin:/usr/local/bin:$PATH"
+            which redis-server || echo "redis-server not found in PATH=$PATH"
+            perl Build.PL && ./Build && ./Build test
