@@ -6,7 +6,7 @@ use Test::RedisServer;
 use Test::TCP;
 
 use EV;
-use EV::Hiredis;
+use EV::Redis;
 
 my $port = empty_port;
 
@@ -16,7 +16,7 @@ eval {
 } or plan skip_all => 'redis-server is required to this test';
 
 
-my $r = EV::Hiredis->new;
+my $r = EV::Redis->new;
 
 my $connected = 0;
 my $error = 0;
@@ -44,7 +44,7 @@ is $error, 0;
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $r_default = EV::Hiredis->new(on_error => undef);
+    my $r_default = EV::Redis->new(on_error => undef);
     # Default handler is 'die @_', which XS catches and warns about
     $r_default->connect('127.0.0.1', 59999);  # Invalid port
     my $t; $t = EV::timer 0.5, 0, sub { undef $t };
@@ -58,7 +58,7 @@ is $error, 0;
 # Test: on_error() without arguments clears the handler
 {
     my $error_count = 0;
-    my $r = EV::Hiredis->new(on_error => sub { $error_count++ });
+    my $r = EV::Redis->new(on_error => sub { $error_count++ });
     $r->on_error();  # Clear the handler
     # Now errors should not call our handler
     $r->connect('127.0.0.1', 59999);  # Invalid port
@@ -68,7 +68,7 @@ is $error, 0;
 }
 
 
-$r = EV::Hiredis->new(connect_timeout => 1000, command_timeout => 1000);
+$r = EV::Redis->new(connect_timeout => 1000, command_timeout => 1000);
 
 $connected = 0;
 $error = 0;
@@ -93,7 +93,7 @@ is $error, 0;
 
 $redis_server->stop;
 
-$r = EV::Hiredis->new;
+$r = EV::Redis->new;
 
 $connected = 0;
 $error = 0;
@@ -124,7 +124,7 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
 # Test: disconnect() is idempotent (no error on double call)
 {
     my $error_count = 0;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_error => sub { $error_count++ },
     );
 
@@ -143,7 +143,7 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
 # Test: disconnect() on never-connected instance is safe
 {
     my $error_count = 0;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_error => sub { $error_count++ },
     );
 
@@ -159,7 +159,7 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_error => sub { },
         on_disconnect => sub {
             $disconnect_called = 1;
@@ -186,7 +186,7 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_error => sub { },
         on_connect => sub {
             $connect_called = 1;
@@ -213,7 +213,7 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_error => sub {
             $error_called = 1;
             die "intentional exception in error handler";
@@ -235,7 +235,7 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
 
 # Test: connect() when already connected throws exception
 {
-    my $r = EV::Hiredis->new;
+    my $r = EV::Redis->new;
     $r->on_error(sub { });
 
     $r->connect('127.0.0.1', $port);
@@ -262,7 +262,7 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
 {
     my @results;
     my $disconnect_called = 0;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_error => sub { },
         on_disconnect => sub {
             $disconnect_called++;
@@ -294,7 +294,7 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
 {
     my $connect_called = 0;
     my @results;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_error => sub { },
         on_connect => sub {
             $connect_called++;
@@ -328,7 +328,7 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
     my $connect_called = 0;
     my @results;
     my $r;
-    $r = EV::Hiredis->new(
+    $r = EV::Redis->new(
         on_error => sub { },
         on_connect => sub {
             $connect_called++;
@@ -358,10 +358,42 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
     is $r->is_connected, 0, 'not connected after disconnect in on_connect';
 }
 
+# Test: disconnect() from inside a reply callback (deferred disconnect path)
+{
+    my @results;
+    my $disconnect_called = 0;
+    my $r = EV::Redis->new(
+        on_error => sub { },
+        on_disconnect => sub { $disconnect_called++ },
+    );
+    $r->connect('127.0.0.1', $port);
+
+    $r->set('dc_reply_1', 'val1', sub {
+        my ($res, $err) = @_;
+        push @results, ['cmd1', $res, $err];
+        $r->disconnect;
+    });
+    $r->set('dc_reply_2', 'val2', sub {
+        my ($res, $err) = @_;
+        push @results, ['cmd2', $res, $err];
+    });
+    $r->set('dc_reply_3', 'val3', sub {
+        my ($res, $err) = @_;
+        push @results, ['cmd3', $res, $err];
+    });
+
+    EV::run;
+
+    is scalar(@results), 3, 'all 3 callbacks invoked after disconnect in callback';
+    is $results[0][1], 'OK', 'first command succeeded before deferred disconnect';
+    is $disconnect_called, 1, 'disconnect callback fired once';
+    is $r->is_connected, 0, 'no longer connected after deferred disconnect';
+}
+
 # Test: constructor rejects both host and path
 {
     eval {
-        EV::Hiredis->new(
+        EV::Redis->new(
             host => '127.0.0.1',
             path => '/tmp/redis.sock',
             on_error => sub { },
@@ -380,7 +412,7 @@ SKIP: {
     my $start_time = EV::time;
     my $timer;
 
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_error => sub {
             $error_msg ||= $_[0];
             $error_time //= EV::time;

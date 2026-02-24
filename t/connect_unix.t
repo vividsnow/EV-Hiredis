@@ -6,7 +6,7 @@ use Test::RedisServer;
 use Test::TCP;
 
 use EV;
-use EV::Hiredis;
+use EV::Redis;
 
 my $redis_server;
 eval {
@@ -17,7 +17,7 @@ my %connect_info = $redis_server->connect_info;
 
 # Test: connect via unix socket
 {
-    my $r = EV::Hiredis->new;
+    my $r = EV::Redis->new;
     my $connected = 0;
     my $error = 0;
     my $disconnected = 0;
@@ -48,7 +48,7 @@ my %connect_info = $redis_server->connect_info;
 
 # Test: connect_unix() when already connected throws exception
 {
-    my $r = EV::Hiredis->new;
+    my $r = EV::Redis->new;
     $r->on_error(sub { });
 
     $r->connect_unix($connect_info{sock});
@@ -76,7 +76,7 @@ my %connect_info = $redis_server->connect_info;
 
 # Test: connect_unix() then connect() throws exception
 {
-    my $r = EV::Hiredis->new;
+    my $r = EV::Redis->new;
     $r->on_error(sub { });
 
     $r->connect_unix($connect_info{sock});

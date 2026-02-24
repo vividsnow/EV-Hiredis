@@ -1,10 +1,11 @@
 {
    "abstract" : "Asynchronous redis client using hiredis and EV",
    "author" : [
-      "Daisuke Murase <typester@cpan.org>"
+      "Daisuke Murase (typester)",
+      "vividsnow"
    ],
-   "dynamic_config" : 0,
-   "generated_by" : "Minilla/v3.1.23, CPAN::Meta::Converter version 2.150010",
+   "dynamic_config" : 1,
+   "generated_by" : "ExtUtils::MakeMaker version 7.78, CPAN::Meta::Converter version 2.150013",
    "license" : [
       "perl_5"
    ],
@@ -12,46 +13,26 @@
       "url" : "http://search.cpan.org/perldoc?CPAN::Meta::Spec",
       "version" : 2
    },
-   "name" : "EV-Hiredis",
+   "name" : "EV-Redis",
    "no_index" : {
       "directory" : [
          "t",
          "xt",
-         "inc",
-         "share",
-         "eg",
-         "examples",
-         "author",
-         "builder",
-         "deps"
+         "deps",
+         "src"
       ]
    },
    "prereqs" : {
       "build" : {
          "requires" : {
-            "Devel::Refcount" : "0",
-            "Test::Deep" : "0",
-            "Test::More" : "0.98",
-            "Test::RedisServer" : "0.12",
-            "Test::TCP" : "1.18"
+            "ExtUtils::MakeMaker" : "0"
          }
       },
       "configure" : {
          "requires" : {
             "EV::MakeMaker" : "0",
-            "File::Which" : "0",
-            "Module::Build" : "0.4005",
-            "Module::Build::XSUtil" : "0.03"
-         }
-      },
-      "develop" : {
-         "requires" : {
-            "Redis" : "0",
-            "Test::CPAN::Meta" : "0",
-            "Test::MinimumVersion::Fast" : "0.04",
-            "Test::PAUSE::Permissions" : "0.07",
-            "Test::Pod" : "1.41",
-            "Test::Spellunker" : "v0.2.7"
+            "ExtUtils::MakeMaker" : "6.64",
+            "File::Which" : "0"
          }
       },
       "runtime" : {
@@ -60,26 +41,28 @@
             "XSLoader" : "0.02",
             "perl" : "5.012000"
          }
+      },
+      "test" : {
+         "requires" : {
+            "Devel::Refcount" : "0",
+            "Test::Deep" : "0",
+            "Test::More" : "0.98",
+            "Test::RedisServer" : "0.12",
+            "Test::TCP" : "1.18"
+         }
       }
    },
-   "release_status" : "unstable",
+   "release_status" : "stable",
    "resources" : {
       "bugtracker" : {
-         "web" : "https://github.com/typester/EV-Hiredis/issues"
+         "web" : "https://github.com/vividsnow/perl5-ev-redis/issues"
       },
-      "homepage" : "https://github.com/typester/EV-Hiredis",
       "repository" : {
          "type" : "git",
-         "url" : "https://github.com/typester/EV-Hiredis.git",
-         "web" : "https://github.com/typester/EV-Hiredis"
+         "url" : "https://github.com/vividsnow/perl5-ev-redis.git",
+         "web" : "https://github.com/vividsnow/perl5-ev-redis"
       }
    },
-   "version" : "0.07",
-   "x_contributors" : [
-      "ICHINOSE Shogo <shogo82148@gmail.com>",
-      "taniwaki-makoto <taniwaki-makoto@kayac.com>",
-      "vividsnow <vividsnow@gmail.com>"
-   ],
-   "x_serialization_backend" : "JSON::PP version 4.16",
+   "version" : "0.09",
    "x_static_install" : 0
 }

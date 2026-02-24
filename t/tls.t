@@ -6,15 +6,15 @@ use Test::TCP;
 use POSIX ();
 
 use EV;
-use EV::Hiredis;
+use EV::Redis;
 
 # has_ssl is always available regardless of build configuration
-ok(defined EV::Hiredis->has_ssl, 'has_ssl method exists');
+ok(defined EV::Redis->has_ssl, 'has_ssl method exists');
 
-unless (EV::Hiredis->has_ssl) {
+unless (EV::Redis->has_ssl) {
     # Verify that tls => 1 croaks helpfully when SSL not compiled
     eval {
-        EV::Hiredis->new(
+        EV::Redis->new(
             host => 'localhost',
             tls  => 1,
         );
@@ -28,11 +28,11 @@ unless (EV::Hiredis->has_ssl) {
 diag "TLS support is enabled";
 
 # Test: has_ssl returns true
-is(EV::Hiredis->has_ssl, 1, 'has_ssl returns 1 when compiled with TLS');
+is(EV::Redis->has_ssl, 1, 'has_ssl returns 1 when compiled with TLS');
 
 # Test: SSL context creation with invalid cert path croaks
 {
-    my $r = EV::Hiredis->new();
+    my $r = EV::Redis->new();
     eval {
         $r->_setup_ssl_context('/nonexistent/ca.crt', undef, undef, undef, undef);
     };
@@ -42,7 +42,7 @@ is(EV::Hiredis->has_ssl, 1, 'has_ssl returns 1 when compiled with TLS');
 # Test: tls with path croaks
 {
     eval {
-        EV::Hiredis->new(
+        EV::Redis->new(
             path => '/tmp/redis.sock',
             tls  => 1,
         );
@@ -52,16 +52,26 @@ is(EV::Hiredis->has_ssl, 1, 'has_ssl returns 1 when compiled with TLS');
 
 # Test: SSL context creation succeeds with no certs (uses system defaults)
 {
-    my $r = EV::Hiredis->new();
+    my $r = EV::Redis->new();
     eval {
         $r->_setup_ssl_context(undef, undef, undef, undef, undef);
     };
     is($@, '', 'SSL context with system defaults succeeds');
 }
 
+# Test: SSL context creation with tls_capath (directory of CA certs)
+# OpenSSL silently accepts nonexistent CApath dirs, so just verify it doesn't croak
+{
+    my $r = EV::Redis->new();
+    eval {
+        $r->_setup_ssl_context(undef, '/tmp', undef, undef, undef);
+    };
+    is($@, '', 'SSL context with tls_capath directory succeeds');
+}
+
 # Test: cert without key croaks
 {
-    my $r = EV::Hiredis->new();
+    my $r = EV::Redis->new();
     eval {
         $r->_setup_ssl_context(undef, undef, '/tmp/cert.pem', undef, undef);
     };
@@ -107,10 +117,12 @@ my $srv_cert  = "$certdir/server.crt";
 my $srv_csr   = "$certdir/server.csr";
 
 # Generate CA
-system("openssl genrsa -out $ca_key 2048 2>/dev/null") == 0
-    or die "Failed to generate CA key";
-system("openssl req -new -x509 -key $ca_key -out $ca_cert -days 1 -subj '/CN=Test CA' 2>/dev/null") == 0
-    or die "Failed to generate CA cert";
+unless (system("openssl genrsa -out $ca_key 2048 2>/dev/null") == 0 &&
+        system("openssl req -new -x509 -key $ca_key -out $ca_cert -days 1 -subj '/CN=Test CA' 2>/dev/null") == 0) {
+    diag "Failed to generate CA cert — skipping TLS connection tests";
+    done_testing;
+    exit;
+}
 
 # Generate server cert signed by CA
 system("openssl genrsa -out $srv_key 2048 2>/dev/null") == 0
@@ -188,7 +200,7 @@ END {
 # Test: TLS connection with CA cert
 {
     my ($connected, $error, $result) = (0, 0, undef);
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         host   => '127.0.0.1',
         port   => $tls_port,
         tls    => 1,
@@ -213,7 +225,7 @@ END {
 # Test: SET/GET over TLS
 {
     my ($get_result, $error) = (undef, 0);
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         host   => '127.0.0.1',
         port   => $tls_port,
         tls    => 1,
@@ -241,7 +253,7 @@ END {
 {
     my ($connected, $error, $error_msg) = (0, 0, '');
     my $r;
-    $r = EV::Hiredis->new(
+    $r = EV::Redis->new(
         host            => '127.0.0.1',
         port            => $tls_port,
         tls             => 1,
@@ -264,7 +276,7 @@ END {
 # Test: TLS with tls_verify => 0 (skip peer verification, no CA needed)
 {
     my ($connected, $error) = (0, 0);
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         host       => '127.0.0.1',
         port       => $tls_port,
         tls        => 1,
@@ -281,10 +293,37 @@ END {
     is($error, 0, 'no error with tls_verify => 0');
 }
 
+# Test: TLS connection with tls_capath (directory containing CA cert)
+{
+    # OpenSSL CApath requires hashed symlinks; create them
+    my $cadir = tempdir(CLEANUP => 1);
+    my $hash = `openssl x509 -hash -noout -in $ca_cert 2>/dev/null`;
+    chomp $hash;
+    symlink($ca_cert, "$cadir/$hash.0") if $hash;
+
+    SKIP: {
+        skip 'could not create CA hash symlink', 2 unless $hash && -l "$cadir/$hash.0";
+
+        my ($connected, $error) = (0, 0);
+        my $r = EV::Redis->new(
+            host       => '127.0.0.1',
+            port       => $tls_port,
+            tls        => 1,
+            tls_capath => $cadir,
+        );
+        $r->on_error(sub { $error++; $r->disconnect });
+        $r->on_connect(sub { $connected++; $r->disconnect });
+        EV::run;
+
+        is($connected, 1, 'TLS connection with tls_capath succeeds');
+        is($error, 0, 'no error with tls_capath');
+    }
+}
+
 # Test: TLS constructor with invalid CA cert croaks at construction time
 {
     eval {
-        EV::Hiredis->new(
+        EV::Redis->new(
             host   => '127.0.0.1',
             port   => $tls_port,
             tls    => 1,
@@ -297,7 +336,7 @@ END {
 # Test: TLS reconnection
 {
     my ($connected, $disconnected, $error, $reconnected) = (0, 0, 0, 0);
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         host      => '127.0.0.1',
         port      => $tls_port,
         tls       => 1,
@@ -318,7 +357,7 @@ END {
                     return;
                 }
                 # Use a second connection to kill ourselves
-                my $r2 = EV::Hiredis->new(
+                my $r2 = EV::Redis->new(
                     host   => '127.0.0.1',
                     port   => $tls_port,
                     tls    => 1,

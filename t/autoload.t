@@ -2,9 +2,9 @@ use strict;
 use warnings;
 use Test::More;
 
-use EV::Hiredis;
+use EV::Redis;
 
-my $redis = EV::Hiredis->new;
+my $redis = EV::Redis->new;
 
 ok !$redis->can('foo');
 

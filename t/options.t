@@ -4,7 +4,9 @@ use Test::More;
 use Test::RedisServer;
 
 use EV;
-use EV::Hiredis;
+use EV::Redis;
+use lib 't/lib';
+use RedisTestHelper qw(get_redis_version);
 
 my $redis_server;
 eval {
@@ -16,7 +18,7 @@ my %connect_info = $redis_server->connect_info;
 # --- keepalive ---
 
 {
-    my $r = EV::Hiredis->new;
+    my $r = EV::Redis->new;
     is $r->keepalive, 0, 'keepalive default is 0';
     $r->keepalive(15);
     is $r->keepalive, 15, 'keepalive setter/getter roundtrip';
@@ -25,18 +27,21 @@ my %connect_info = $redis_server->connect_info;
 }
 
 {
-    my $r = EV::Hiredis->new(keepalive => 30);
+    my $r = EV::Redis->new(keepalive => 30);
     is $r->keepalive, 30, 'keepalive via constructor';
 }
 
 {
-    eval { EV::Hiredis->new->keepalive(-1) };
+    eval { EV::Redis->new->keepalive(-1) };
     like $@, qr/non-negative/, 'keepalive rejects negative';
+
+    eval { EV::Redis->new->keepalive(2_000_001) };
+    like $@, qr/too large/, 'keepalive rejects too large';
 }
 
 # keepalive set while connected
 {
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path     => $connect_info{sock},
         on_error => sub { },
     );
@@ -52,7 +57,7 @@ my %connect_info = $redis_server->connect_info;
 # --- prefer_ipv4 / prefer_ipv6 ---
 
 {
-    my $r = EV::Hiredis->new;
+    my $r = EV::Redis->new;
     is $r->prefer_ipv4, 0, 'prefer_ipv4 default is 0';
     is $r->prefer_ipv6, 0, 'prefer_ipv6 default is 0';
 
@@ -70,13 +75,13 @@ my %connect_info = $redis_server->connect_info;
 }
 
 {
-    my $r = EV::Hiredis->new(prefer_ipv4 => 1);
+    my $r = EV::Redis->new(prefer_ipv4 => 1);
     is $r->prefer_ipv4, 1, 'prefer_ipv4 via constructor';
     is $r->prefer_ipv6, 0, 'prefer_ipv6 not set';
 }
 
 {
-    my $r = EV::Hiredis->new(prefer_ipv6 => 1);
+    my $r = EV::Redis->new(prefer_ipv6 => 1);
     is $r->prefer_ipv6, 1, 'prefer_ipv6 via constructor';
     is $r->prefer_ipv4, 0, 'prefer_ipv4 not set';
 }
@@ -84,7 +89,7 @@ my %connect_info = $redis_server->connect_info;
 # --- source_addr ---
 
 {
-    my $r = EV::Hiredis->new;
+    my $r = EV::Redis->new;
     ok !defined $r->source_addr, 'source_addr default is undef';
 
     $r->source_addr('192.168.1.1');
@@ -98,14 +103,14 @@ my %connect_info = $redis_server->connect_info;
 }
 
 {
-    my $r = EV::Hiredis->new(source_addr => '127.0.0.1');
+    my $r = EV::Redis->new(source_addr => '127.0.0.1');
     is $r->source_addr, '127.0.0.1', 'source_addr via constructor';
 }
 
 # --- tcp_user_timeout ---
 
 {
-    my $r = EV::Hiredis->new;
+    my $r = EV::Redis->new;
     is $r->tcp_user_timeout, 0, 'tcp_user_timeout default is 0';
 
     $r->tcp_user_timeout(5000);
@@ -116,22 +121,22 @@ my %connect_info = $redis_server->connect_info;
 }
 
 {
-    my $r = EV::Hiredis->new(tcp_user_timeout => 3000);
+    my $r = EV::Redis->new(tcp_user_timeout => 3000);
     is $r->tcp_user_timeout, 3000, 'tcp_user_timeout via constructor';
 }
 
 {
-    eval { EV::Hiredis->new->tcp_user_timeout(-1) };
+    eval { EV::Redis->new->tcp_user_timeout(-1) };
     like $@, qr/non-negative/, 'tcp_user_timeout rejects negative';
 
-    eval { EV::Hiredis->new->tcp_user_timeout(3_000_000_000) };
+    eval { EV::Redis->new->tcp_user_timeout(3_000_000_000) };
     like $@, qr/too large/, 'tcp_user_timeout rejects too large';
 }
 
 # --- cloexec ---
 
 {
-    my $r = EV::Hiredis->new;
+    my $r = EV::Redis->new;
     is $r->cloexec, 1, 'cloexec default is 1 (enabled)';
 
     $r->cloexec(0);
@@ -142,19 +147,19 @@ my %connect_info = $redis_server->connect_info;
 }
 
 {
-    my $r = EV::Hiredis->new(cloexec => 0);
+    my $r = EV::Redis->new(cloexec => 0);
     is $r->cloexec, 0, 'cloexec => 0 via constructor';
 }
 
 {
-    my $r = EV::Hiredis->new(cloexec => 1);
+    my $r = EV::Redis->new(cloexec => 1);
     is $r->cloexec, 1, 'cloexec => 1 via constructor';
 }
 
 # --- reuseaddr ---
 
 {
-    my $r = EV::Hiredis->new;
+    my $r = EV::Redis->new;
     is $r->reuseaddr, 0, 'reuseaddr default is 0 (disabled)';
 
     $r->reuseaddr(1);
@@ -165,14 +170,14 @@ my %connect_info = $redis_server->connect_info;
 }
 
 {
-    my $r = EV::Hiredis->new(reuseaddr => 1);
+    my $r = EV::Redis->new(reuseaddr => 1);
     is $r->reuseaddr, 1, 'reuseaddr => 1 via constructor';
 }
 
 # --- command_timeout runtime update ---
 
 {
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path     => $connect_info{sock},
         on_error => sub { },
     );
@@ -194,23 +199,10 @@ my %connect_info = $redis_server->connect_info;
 # --- on_push live registration/deregistration ---
 
 SKIP: {
-    # Get Redis version
-    my $redis_version = 0;
-    {
-        my $r = EV::Hiredis->new(path => $connect_info{sock});
-        $r->info('server', sub {
-            my ($info, $err) = @_;
-            if ($info && $info =~ /redis_version:(\d+)/) {
-                $redis_version = $1;
-            }
-            $r->disconnect;
-        });
-        EV::run;
-    }
-
+    my ($redis_version) = get_redis_version($connect_info{sock});
     skip 'on_push live test requires Redis 6+', 2 if $redis_version < 6;
 
-    my $r = EV::Hiredis->new(path => $connect_info{sock});
+    my $r = EV::Redis->new(path => $connect_info{sock});
     my @push_msgs;
     my $hello_ok = 0;
 
@@ -240,7 +232,7 @@ SKIP: {
 
             $r->command('CLIENT', 'TRACKING', 'ON', 'BCAST', sub {
                 $r->get('push:live:key', sub {
-                    my $r2 = EV::Hiredis->new(path => $connect_info{sock});
+                    my $r2 = EV::Redis->new(path => $connect_info{sock});
                     $r2->set('push:live:key', 'modified', sub {
                         $r2->disconnect;
                         my $wait; $wait = EV::timer 0.2, 0, sub {

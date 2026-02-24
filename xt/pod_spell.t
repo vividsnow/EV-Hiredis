@@ -8,8 +8,10 @@ set_spell_cmd("aspell -l en list");
 all_pod_files_spelling_ok();
 
 __DATA__
+vividsnow
 Daisuke
 Murase
+typester
 KAYAC
 anyevent
 EV
@@ -27,6 +29,7 @@ SSL
 ssl
 SNI
 keepalive
+keepalives
 IPv4
 IPv6
 NAT
@@ -41,3 +44,5 @@ exec
 multi
 homed
 unacknowledged
+psubscribe
+ssubscribe

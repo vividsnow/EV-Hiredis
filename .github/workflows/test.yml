@@ -19,24 +19,24 @@ jobs:
       - name: Set up Perl
         uses: shogo82148/actions-setup-perl@v1
         with:
-          perl-version: "5.36"
+          perl-version: "5.40"
           install-modules-with: cpm
           install-modules-args: --with-develop --with-configure
           install-modules: |
-            Minilla
             Test::CPAN::Meta
             Test::Pod
+            Test::Spellunker
             Test::MinimumVersion::Fast
 
       - name: Set up Redis
         uses: shogo82148/actions-setup-redis@v1
         with:
-          redis-version: "7.0"
+          redis-version: "7.4"
           auto-start: false
 
       - name: Test
         run: |
-          minil test --all
+          perl Makefile.PL && make && RELEASE_TESTING=1 make test
 
   list:
     runs-on: ubuntu-latest
@@ -49,6 +49,8 @@ jobs:
           import json
           import os
           perl = [
+              '5.40',
+              '5.38',
               '5.36',
               '5.34',
               '5.32',
@@ -63,14 +65,12 @@ jobs:
               '5.14'
           ]
           redis = [
+              '7.4',
+              '7.2',
               '7.0',
               '6.2',
               '6.0',
               '5.0',
-              '4.0',
-              '3.2',
-              '3.0',
-              '2.8',
           ]
           includes = []
           for r in redis:
@@ -105,10 +105,7 @@ jobs:
         with:
           perl-version: ${{ matrix.perl }}
           install-modules-with: cpm
-          install-modules-args: --with-develop --with-configure
-          # xxx: we not depend URI directly, however install it explicitly.
-          # because cpm sometimes installs old version of URI.
-          install-modules: Minilla URI
+          install-modules-args: --with-configure --with-test
 
       - name: Set up Redis ${{ matrix.redis }}
         uses: shogo82148/actions-setup-redis@v1
@@ -118,7 +115,58 @@ jobs:
 
       - name: Test
         run: |
-          minil test --norelease --noauthor --noautomated
+          perl Makefile.PL && make && make test
+
+  test-valkey:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Set up Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: "5.40"
+          install-modules-with: cpm
+          install-modules-args: --with-configure --with-test
+
+      - name: Install Valkey
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y valkey-server openssl
+          valkey-server --version
+          # Test::RedisServer looks for redis-server; symlink valkey-server
+          sudo ln -sf "$(which valkey-server)" /usr/local/bin/redis-server
+
+      - name: Test
+        run: |
+          perl Makefile.PL && make && make test
+
+  test-alpine:
+    runs-on: ubuntu-latest
+    container: alpine:latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apk add --no-cache perl perl-dev perl-app-cpanminus make gcc musl-dev pkgconf openssl-dev openssl redis git
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install Perl modules
+        run: |
+          cpanm -n EV EV::MakeMaker File::Which Test::Deep Test::TCP Test::RedisServer Devel::Refcount
+
+      - name: Test
+        run: |
+          redis-server --daemonize yes
+          perl Makefile.PL && make && make test
 
   test-freebsd:
     runs-on: ubuntu-latest
@@ -135,12 +183,12 @@ jobs:
           usesh: true
           prepare: |
             pkg install -y perl5 gmake pkgconf openssl redis
-            pkg install -y p5-App-cpanminus p5-EV p5-Module-Build-XSUtil p5-File-Which p5-Test-Deep p5-Test-TCP
+            pkg install -y p5-App-cpanminus p5-EV p5-File-Which p5-Test-Deep p5-Test-TCP
             cpanm -n Test::RedisServer Devel::Refcount
           run: |
             export PATH="/usr/local/sbin:/usr/local/bin:$PATH"
             which redis-server || echo "redis-server not found in PATH=$PATH"
-            perl Build.PL && ./Build && ./Build test
+            perl Makefile.PL && make && make test
 
   test-openbsd:
     runs-on: ubuntu-latest
@@ -159,8 +207,8 @@ jobs:
             pkg_add gmake pkgconf redis curl
             pkg_add p5-EV
             curl -L https://cpanmin.us | perl - App::cpanminus
-            cpanm -n Module::Build::XSUtil File::Which Test::Deep Test::TCP Test::RedisServer Devel::Refcount
+            cpanm -n File::Which Test::Deep Test::TCP Test::RedisServer Devel::Refcount
           run: |
             export PATH="/usr/local/sbin:/usr/local/bin:$PATH"
             which redis-server || echo "redis-server not found in PATH=$PATH"
-            perl Build.PL && ./Build && ./Build test
+            perl Makefile.PL && make && make test

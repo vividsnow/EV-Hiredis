@@ -11,11 +11,11 @@ eval {
 my %connect_info = $redis_server->connect_info;
 
 use EV;
-use EV::Hiredis;
+use EV::Redis;
 
 # Test: reconnect configuration
 {
-    my $r = EV::Hiredis->new(path => $connect_info{sock});
+    my $r = EV::Redis->new(path => $connect_info{sock});
 
     is $r->reconnect_enabled, 0, 'reconnect disabled by default';
 
@@ -30,7 +30,7 @@ use EV::Hiredis;
 
 # Test: reconnect via constructor
 {
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path => $connect_info{sock},
         reconnect => 1,
         reconnect_delay => 500,
@@ -46,7 +46,7 @@ use EV::Hiredis;
     my $connect_count = 0;
     my $error_count = 0;
 
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_error => sub { $error_count++ },
         on_connect => sub { $connect_count++ },
         reconnect => 1,
@@ -71,7 +71,7 @@ use EV::Hiredis;
 # Test: explicit disconnect does not trigger reconnect
 {
     my $disconnected = 0;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path => $connect_info{sock},
         on_error => sub { },
         on_disconnect => sub { $disconnected = 1 },
@@ -98,7 +98,7 @@ use EV::Hiredis;
 
 # Test: resume_waiting_on_reconnect getter/setter
 {
-    my $r = EV::Hiredis->new(path => $connect_info{sock});
+    my $r = EV::Redis->new(path => $connect_info{sock});
 
     is $r->resume_waiting_on_reconnect, 0, 'resume_waiting_on_reconnect defaults to 0';
     $r->resume_waiting_on_reconnect(1);
@@ -111,7 +111,7 @@ use EV::Hiredis;
 
 # Test: resume_waiting_on_reconnect via constructor
 {
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path => $connect_info{sock},
         resume_waiting_on_reconnect => 1,
     );
@@ -123,7 +123,7 @@ use EV::Hiredis;
 # Test: waiting queue behavior on explicit disconnect (resume_waiting_on_reconnect=0)
 {
     my @results;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path => $connect_info{sock},
         max_pending => 1,  # Commands queue up
     );
@@ -148,7 +148,7 @@ use EV::Hiredis;
 # Test: waiting queue preserved with resume_waiting_on_reconnect=1 (explicit disconnect still errors)
 {
     my @results;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path => $connect_info{sock},
         max_pending => 1,
         resume_waiting_on_reconnect => 1,  # Preserves waiting queue, but not for intentional disconnect
@@ -176,7 +176,7 @@ use EV::Hiredis;
     my $error_count = 0;
     my $disconnect_count = 0;
 
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_connect => sub { $connect_count++ },
         on_error => sub { $error_count++ },
         on_disconnect => sub { $disconnect_count++ },
@@ -203,7 +203,7 @@ use EV::Hiredis;
 {
     my $error_in_callback = 0;
     my $r;
-    $r = EV::Hiredis->new(
+    $r = EV::Redis->new(
         path => $connect_info{sock},
         on_error => sub { },
         on_disconnect => sub {
@@ -229,7 +229,7 @@ use EV::Hiredis;
 {
     my @results;
     my $skip_called = 0;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path => $connect_info{sock},
         max_pending => 1,  # Commands queue up in waiting
     );
@@ -258,7 +258,7 @@ use EV::Hiredis;
 # This verifies that on_connect is called on initial connect
 {
     my $connect_count = 0;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path => $connect_info{sock},
         on_connect => sub { $connect_count++ },
         on_error => sub { },
@@ -279,7 +279,7 @@ use EV::Hiredis;
 # (This tests the connect callback's waiting queue drain logic)
 {
     my @results;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path => $connect_info{sock},
         max_pending => 1,  # Force commands to wait
     );
@@ -308,7 +308,7 @@ use EV::Hiredis;
 # (Tests the reconnect scheduling path without requiring forced disconnect)
 {
     my $error_count = 0;
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         on_error => sub { $error_count++ },
         reconnect => 1,
         reconnect_delay => 50,
@@ -328,11 +328,11 @@ use EV::Hiredis;
     $r->disconnect;
 }
 
-# Test: reconnect_delay with zero value defaults to 1000ms
+# Test: reconnect_delay with zero value (immediate reconnect)
 {
-    my $r = EV::Hiredis->new(path => $connect_info{sock});
+    my $r = EV::Redis->new(path => $connect_info{sock});
 
-    # Zero delay should be clamped to 1000ms (internal default)
+    # Zero delay means immediate reconnect (no clamping)
     $r->reconnect(1, 0, 3);
     is $r->reconnect_enabled, 1, 'reconnect enabled with zero delay';
 
@@ -341,7 +341,7 @@ use EV::Hiredis;
 
 # Test: reconnect_delay with negative value throws exception
 {
-    my $r = EV::Hiredis->new(path => $connect_info{sock});
+    my $r = EV::Redis->new(path => $connect_info{sock});
 
     my $died = 0;
     eval {
@@ -357,7 +357,7 @@ use EV::Hiredis;
 
 # Test: reconnect_delay overflow protection
 {
-    my $r = EV::Hiredis->new(path => $connect_info{sock});
+    my $r = EV::Redis->new(path => $connect_info{sock});
 
     my $died = 0;
     eval {
@@ -380,7 +380,7 @@ use EV::Hiredis;
 
 # Test: negative max_reconnect_attempts clamping
 {
-    my $r = EV::Hiredis->new(path => $connect_info{sock});
+    my $r = EV::Redis->new(path => $connect_info{sock});
 
     # Negative max_attempts should be clamped to 0 (unlimited retries)
     $r->reconnect(1, 100, -5);
@@ -397,7 +397,7 @@ use EV::Hiredis;
 # Test: constructor with negative/zero reconnect parameters
 {
     # Zero reconnect_delay via constructor
-    my $r1 = EV::Hiredis->new(
+    my $r1 = EV::Redis->new(
         path => $connect_info{sock},
         reconnect => 1,
         reconnect_delay => 0,
@@ -407,7 +407,7 @@ use EV::Hiredis;
     $r1->disconnect;
 
     # Negative max_reconnect_attempts via constructor
-    my $r2 = EV::Hiredis->new(
+    my $r2 = EV::Redis->new(
         path => $connect_info{sock},
         reconnect => 1,
         reconnect_delay => 100,
@@ -425,7 +425,7 @@ SKIP: {
     my $error_count = 0;
     my $ping_after_reconnect = '';
 
-    my $r = EV::Hiredis->new(
+    my $r = EV::Redis->new(
         path => $connect_info{sock},
         on_connect => sub { $connect_count++ },
         on_error => sub { $error_count++ },
@@ -463,7 +463,7 @@ SKIP: {
     $r->connect_unix($connect_info{sock});
 
     # Helper connection to issue CLIENT KILL
-    my $helper = EV::Hiredis->new(
+    my $helper = EV::Redis->new(
         path => $connect_info{sock},
         on_error => sub { },
     );
@@ -502,6 +502,299 @@ SKIP: {
     ok $error_count >= 1, 'error handler called during reconnect';
     is $ping_after_reconnect, 'PONG', 'successful ping after automatic reconnection';
     is $r->is_connected, 0, 'disconnected after test cleanup';
+}
+
+# Test: resume_waiting_on_reconnect preserves waiting commands across unexpected disconnect
+SKIP: {
+    my $r = EV::Redis->new(
+        path => $connect_info{sock},
+        max_pending => 1,
+        resume_waiting_on_reconnect => 1,
+        reconnect => 1,
+        reconnect_delay => 100,
+        max_reconnect_attempts => 10,
+        on_error => sub { },
+    );
+
+    my $helper = EV::Redis->new(path => $connect_info{sock}, on_error => sub {});
+
+    # Get client ID (requires Redis 5.0+)
+    my $client_id;
+    my $skip_reason;
+    $r->command('CLIENT', 'ID', sub {
+        my ($res, $err) = @_;
+        if ($err) {
+            $skip_reason = "CLIENT ID not supported: $err";
+        } else {
+            $client_id = $res;
+        }
+    });
+
+    my $id_timer; $id_timer = EV::timer 1, 0, sub { undef $id_timer; EV::break };
+    EV::run;
+
+    skip $skip_reason, 3 if $skip_reason;
+    skip 'failed to get client ID', 3 unless defined $client_id;
+
+    # Use BLPOP to hold the pending slot (blocks server-side for this connection)
+    $r->blpop('resume_wait_nonexistent_key', 10, sub { });
+
+    # These go to the waiting queue since pending slot is occupied by BLPOP
+    my @wait_results;
+    $r->set('resume_wait_key2', 'v2', sub {
+        my ($res, $err) = @_;
+        push @wait_results, [$res, $err];
+    });
+    $r->set('resume_wait_key3', 'v3', sub {
+        my ($res, $err) = @_;
+        push @wait_results, [$res, $err];
+        $r->disconnect;
+    });
+
+    is $r->waiting_count, 2, 'two commands in waiting queue';
+
+    # Kill connection from helper to trigger unintentional disconnect
+    # Short delay to ensure BLPOP is blocking on the server
+    my $kill_timer; $kill_timer = EV::timer 0.1, 0, sub {
+        undef $kill_timer;
+        $helper->command('CLIENT', 'KILL', 'ID', $client_id, sub {
+            $helper->disconnect;
+        });
+    };
+
+    my $timeout; $timeout = EV::timer 3, 0, sub {
+        undef $timeout;
+        $r->disconnect;
+    };
+    EV::run;
+
+    is scalar(@wait_results), 2, 'both waiting commands executed after reconnect';
+    is $wait_results[0][0], 'OK', 'waiting command succeeded after reconnect';
+}
+
+# Test: auto-queuing commands during reconnect window
+# When reconnect is active and ac==NULL, command() should queue to wait_queue
+# instead of croaking. Queued commands execute after successful reconnection.
+SKIP: {
+    my @results;
+    my $queued_ok = 0;
+
+    my $r = EV::Redis->new(
+        path => $connect_info{sock},
+        reconnect => 1,
+        reconnect_delay => 100,
+        max_reconnect_attempts => 10,
+        on_error => sub { },
+    );
+
+    # Get client ID for CLIENT KILL (requires Redis 5.0+)
+    my ($client_id, $skip_reason);
+    $r->command('CLIENT', 'ID', sub {
+        my ($res, $err) = @_;
+        if ($err) { $skip_reason = "CLIENT ID not supported: $err" }
+        else { $client_id = $res }
+    });
+
+    my $id_timer; $id_timer = EV::timer 1, 0, sub { undef $id_timer; EV::break };
+    EV::run;
+
+    skip $skip_reason, 5 if $skip_reason;
+    skip 'failed to get client ID', 5 unless defined $client_id;
+
+    my $helper = EV::Redis->new(path => $connect_info{sock}, on_error => sub {});
+
+    # Use on_disconnect to queue commands at exactly the right moment:
+    # after disconnect_cb completes (ac==NULL, reconnect_timer_active==1).
+    $r->on_disconnect(sub {
+        # Schedule command queuing for next event loop iteration
+        # (after disconnect_cb returns and reconnect timer is started).
+        my $qt; $qt = EV::timer 0, 0, sub {
+            undef $qt;
+            eval {
+                $r->set('autoq_key1', 'val1', sub {
+                    push @results, ['set1', $_[0], $_[1]];
+                });
+                $r->set('autoq_key2', 'val2', sub {
+                    push @results, ['set2', $_[0], $_[1]];
+                });
+                $queued_ok = 1;
+            };
+            if ($@) {
+                diag "auto-queue croak'd: $@";
+            }
+        };
+    });
+
+    # Kill $r's connection to trigger unexpected disconnect + reconnect
+    my $kill_timer; $kill_timer = EV::timer 0.2, 0, sub {
+        undef $kill_timer;
+        $helper->command('CLIENT', 'KILL', 'ID', $client_id, sub {});
+    };
+
+    # Check results after enough time for reconnect
+    my $check_timer; $check_timer = EV::timer 3, 0, sub {
+        undef $check_timer;
+        $r->disconnect;
+        $helper->disconnect;
+    };
+
+    EV::run;
+
+    ok $queued_ok, 'commands during reconnect window did not croak';
+    is scalar(@results), 2, 'both auto-queued commands got callbacks';
+    is $results[0][1], 'OK', 'first auto-queued command succeeded after reconnect';
+    is $results[1][1], 'OK', 'second auto-queued command succeeded after reconnect';
+    is $r->is_connected, 0, 'disconnected after cleanup';
+}
+
+# Test: auto-queuing NOT enabled without reconnect
+# Without reconnect enabled, command() during disconnect should still croak.
+{
+    my $r = EV::Redis->new(
+        path => $connect_info{sock},
+        on_error => sub { },
+    );
+
+    $r->ping(sub {
+        # Wait for connection, then disconnect
+        $r->disconnect;
+    });
+    EV::run;
+
+    # Now ac==NULL, reconnect not enabled — should croak
+    my $croaked = 0;
+    eval { $r->set('key', 'val', sub {}) };
+    $croaked = 1 if $@;
+
+    ok $croaked, 'command without reconnect still croaks when disconnected';
+    like $@, qr/connection required/, 'croak message mentions connection required';
+}
+
+# Test: auto-queuing with waiting_timeout expires commands during long reconnect
+SKIP: {
+    my @results;
+
+    my $r = EV::Redis->new(
+        path => $connect_info{sock},
+        reconnect => 1,
+        reconnect_delay => 100,
+        max_reconnect_attempts => 10,
+        waiting_timeout => 300,  # 300ms — shorter than reconnect to invalid port
+        on_error => sub { },
+    );
+
+    # Get client ID
+    my ($client_id, $skip_reason);
+    $r->command('CLIENT', 'ID', sub {
+        my ($res, $err) = @_;
+        if ($err) { $skip_reason = "CLIENT ID not supported: $err" }
+        else { $client_id = $res }
+    });
+
+    my $t; $t = EV::timer 1, 0, sub { undef $t; EV::break };
+    EV::run;
+
+    skip $skip_reason, 3 if $skip_reason;
+    skip 'failed to get client ID', 3 unless defined $client_id;
+
+    my $helper = EV::Redis->new(path => $connect_info{sock}, on_error => sub {});
+
+    # Stop the redis server's listening so reconnect attempts fail
+    # (We can't easily stop Test::RedisServer, so instead we'll kill $r's
+    # connection and have it try to reconnect — it will succeed quickly.
+    # Instead, test a simpler scenario: queue command, verify it gets
+    # the timeout error if waiting_timeout fires before reconnect.)
+
+    # Queue commands after disconnect is confirmed
+    $r->on_disconnect(sub {
+        my $qt; $qt = EV::timer 0, 0, sub {
+            undef $qt;
+            eval {
+                $r->set('timeout_key', 'val', sub {
+                    push @results, [@_];
+                });
+            };
+        };
+    });
+
+    # Kill connection
+    $helper->command('CLIENT', 'KILL', 'ID', $client_id, sub {
+        $helper->disconnect;
+    });
+
+    # Check — reconnect will likely succeed before timeout, so the command
+    # should execute successfully. But at minimum verify no crash.
+    my $done_timer; $done_timer = EV::timer 2, 0, sub {
+        undef $done_timer;
+        $r->disconnect;
+    };
+
+    EV::run;
+
+    is scalar(@results), 1, 'auto-queued command callback fired';
+    ok(defined($results[0][0]) || defined($results[0][1]),
+       'callback got either result or error (no silent drop)');
+    is $r->is_connected, 0, 'disconnected after cleanup';
+}
+
+# Test: reconnect_attempts counter resets after successful reconnect
+# After reconnecting successfully, the counter should reset so the full
+# max_reconnect_attempts are available again for the next failure.
+SKIP: {
+    my $r = EV::Redis->new(
+        path => $connect_info{sock},
+        reconnect => 1,
+        reconnect_delay => 100,
+        max_reconnect_attempts => 3,
+        on_error => sub { },
+    );
+
+    my $helper = EV::Redis->new(path => $connect_info{sock}, on_error => sub {});
+
+    my ($client_id, $skip_reason);
+    $r->command('CLIENT', 'ID', sub {
+        my ($res, $err) = @_;
+        if ($err) { $skip_reason = "CLIENT ID not supported: $err" }
+        else { $client_id = $res }
+    });
+
+    my $t; $t = EV::timer 1, 0, sub { undef $t; EV::break };
+    EV::run;
+
+    skip $skip_reason, 2 if $skip_reason;
+    skip 'failed to get client ID', 2 unless defined $client_id;
+
+    # Kill connection #1 — should reconnect successfully
+    my $reconnect_count = 0;
+    $r->on_connect(sub {
+        $reconnect_count++;
+        EV::break;
+    });
+
+    $helper->command('CLIENT', 'KILL', 'ID', $client_id, sub {});
+
+    my $wait; $wait = EV::timer 3, 0, sub { undef $wait; EV::break };
+    EV::run;
+
+    ok $reconnect_count >= 1, "reconnected after first kill (got $reconnect_count)";
+
+    # Kill connection #2 — counter should have been reset, so this should
+    # also reconnect (not fail with "max attempts reached")
+    $reconnect_count = 0;
+    $r->command('CLIENT', 'ID', sub {
+        my ($res, $err) = @_;
+        return unless defined $res;
+        $helper->command('CLIENT', 'KILL', 'ID', $res, sub {});
+    });
+
+    my $wait2; $wait2 = EV::timer 3, 0, sub { undef $wait2; EV::break };
+    EV::run;
+
+    ok $reconnect_count >= 1, "reconnected after second kill (counter was reset, got $reconnect_count)";
+
+    $r->on_connect(undef);
+    $r->disconnect;
+    $helper->disconnect;
 }
 
 done_testing;

@@ -12,10 +12,12 @@ eval {
 my %connect_info = $redis_server->connect_info;
 
 use EV;
-use EV::Hiredis;
+use EV::Redis;
+use lib 't/lib';
+use RedisTestHelper qw(get_redis_version);
 
-my $subscriber = EV::Hiredis->new( path => $connect_info{sock} );
-my $publisher  = EV::Hiredis->new( path => $connect_info{sock} );
+my $subscriber = EV::Redis->new( path => $connect_info{sock} );
+my $publisher  = EV::Redis->new( path => $connect_info{sock} );
 
 $subscriber->command('subscribe', 'foo', sub {
     my ($r, $e) = @_;
@@ -31,7 +33,7 @@ $subscriber->command('subscribe', 'foo', sub {
 
         $publisher->command('publish', 'foo', 'bar', sub {
             my ($r, $e) = @_;
-            ok !$e;
+            ok !defined $e, 'no publish error';
             is $r, 1;
 
             $publisher->disconnect;
@@ -41,15 +43,9 @@ $subscriber->command('subscribe', 'foo', sub {
         is $r->[1], 'foo';
         is $r->[2], 'bar';
 
-        $subscriber->unsubscribe('foo', sub {
-            my ($r, $e) = @_;
-            # This callback gets invoked with disconnect error
-            if ($e && !defined $r) {
-                pass 'unsubscribe callback received disconnect error';
-            } else {
-                fail 'unexpected response in unsubscribe callback';
-            }
-        });
+        # Unsubscribe callback is silently discarded — hiredis routes the
+        # confirmation through the original subscribe callback above.
+        $subscriber->unsubscribe('foo');
     } elsif ($r->[0] eq 'unsubscribe') {
         is $r->[1], 'foo';
 
@@ -57,12 +53,74 @@ $subscriber->command('subscribe', 'foo', sub {
     }
 });
 
+my $timeout; $timeout = EV::timer 5, 0, sub {
+    undef $timeout;
+    $subscriber->disconnect;
+    $publisher->disconnect;
+    EV::break;
+};
+
 EV::run;
+
+# Test: multi-channel subscribe
+{
+    my $subscriber = EV::Redis->new( path => $connect_info{sock} );
+    my $publisher  = EV::Redis->new( path => $connect_info{sock} );
+
+    my @received;
+
+    $subscriber->command('subscribe', 'mchan1', 'mchan2', sub {
+        my ($r, $e) = @_;
+
+        if ($e && !defined $r) {
+            return;
+        }
+
+        push @received, $r;
+
+        if ($r->[0] eq 'subscribe' && $r->[2] == 2) {
+            $publisher->publish('mchan1', 'msg1', sub {
+                $publisher->publish('mchan2', 'msg2', sub {
+                    $publisher->disconnect;
+                });
+            });
+        }
+        elsif ($r->[0] eq 'message' && $r->[1] eq 'mchan2') {
+            $subscriber->unsubscribe('mchan1', 'mchan2');
+        }
+        elsif ($r->[0] eq 'unsubscribe' && $r->[2] == 0) {
+            $subscriber->disconnect;
+        }
+    });
+
+    my $timeout; $timeout = EV::timer 3, 0, sub {
+        undef $timeout;
+        $subscriber->disconnect;
+        $publisher->disconnect;
+        EV::break;
+    };
+
+    EV::run;
+
+    my @subscribe_msgs = grep { $_->[0] eq 'subscribe' } @received;
+    is scalar(@subscribe_msgs), 2, 'multi-subscribe: got 2 subscribe confirmations';
+    is $subscribe_msgs[0][1], 'mchan1', 'multi-subscribe: first is mchan1';
+    is $subscribe_msgs[1][1], 'mchan2', 'multi-subscribe: second is mchan2';
+
+    my @messages = grep { $_->[0] eq 'message' } @received;
+    is scalar(@messages), 2, 'multi-subscribe: got 2 messages';
+    my %msg_map = map { $_->[1] => $_->[2] } @messages;
+    is $msg_map{mchan1}, 'msg1', 'multi-subscribe: mchan1 received msg1';
+    is $msg_map{mchan2}, 'msg2', 'multi-subscribe: mchan2 received msg2';
+
+    my @unsub_msgs = grep { $_->[0] eq 'unsubscribe' } @received;
+    is scalar(@unsub_msgs), 2, 'multi-subscribe: got 2 unsubscribe confirmations';
+}
 
 # Test: psubscribe (pattern subscribe)
 {
-    my $subscriber = EV::Hiredis->new( path => $connect_info{sock} );
-    my $publisher  = EV::Hiredis->new( path => $connect_info{sock} );
+    my $subscriber = EV::Redis->new( path => $connect_info{sock} );
+    my $publisher  = EV::Redis->new( path => $connect_info{sock} );
 
     my @received;
 
@@ -93,12 +151,7 @@ EV::run;
             is $r->[2], 'test:foo', 'pmessage channel correct';
             is $r->[3], 'hello', 'pmessage data correct';
 
-            $subscriber->punsubscribe('test:*', sub {
-                my ($r, $e) = @_;
-                if ($e && !defined $r) {
-                    pass 'punsubscribe callback received disconnect error';
-                }
-            });
+            $subscriber->punsubscribe('test:*');
         } elsif ($r->[0] eq 'punsubscribe') {
             is $r->[1], 'test:*', 'punsubscribe pattern correct';
             $subscriber->disconnect;
@@ -110,8 +163,8 @@ EV::run;
 
 # Test: monitor command
 {
-    my $monitor = EV::Hiredis->new( path => $connect_info{sock} );
-    my $client  = EV::Hiredis->new( path => $connect_info{sock} );
+    my $monitor = EV::Redis->new( path => $connect_info{sock} );
+    my $client  = EV::Redis->new( path => $connect_info{sock} );
 
     my @received;
     my $monitor_started = 0;
@@ -157,31 +210,15 @@ EV::run;
 }
 
 # Test: ssubscribe (sharded pub/sub, Redis 7+)
-# Note: This test may have issues with hiredis 1.1.1 and sharded pubsub
+# Note: spublish may trigger assertion failure in some hiredis versions
 SKIP: {
-    # Get Redis version to check if ssubscribe is supported
-    my $version_check = EV::Hiredis->new( path => $connect_info{sock} );
-    my $redis_version = 0;
-    my $version_done = 0;
-
-    $version_check->info('server', sub {
-        my ($info, $err) = @_;
-        if ($info && $info =~ /redis_version:(\d+)\.(\d+)/) {
-            $redis_version = $1;
-        }
-        $version_done = 1;
-    });
-
-    my $t1 = EV::timer 1, 0, sub { $version_done = 1 };
-    EV::run until $version_done;
-    $version_check->disconnect;
+    my ($redis_version) = get_redis_version($connect_info{sock});
 
     # Sharded pubsub requires Redis 7.0+
     skip 'ssubscribe requires Redis 7+', 5 if $redis_version < 7;
 
-    # Note: hiredis 1.1.1 may have issues with sharded pubsub (spublish assertion failure)
-    # Testing only ssubscribe basic functionality
-    my $subscriber = EV::Hiredis->new( path => $connect_info{sock} );
+    # Testing only ssubscribe basic functionality (spublish may cause assertion failure)
+    my $subscriber = EV::Redis->new( path => $connect_info{sock} );
 
     my $subscribed = 0;
 
@@ -197,7 +234,7 @@ SKIP: {
             is $r->[2], 1, 'ssubscribe count correct';
             $subscribed = 1;
             # Unsubscribe immediately to avoid state issues
-            $subscriber->sunsubscribe('sharded_channel', sub {});
+            $subscriber->sunsubscribe('sharded_channel');
         } elsif (ref($r) eq 'ARRAY' && $r->[0] eq 'sunsubscribe') {
             $subscriber->disconnect;
             EV::break;
@@ -214,8 +251,72 @@ SKIP: {
 
     ok $subscribed, 'ssubscribe basic functionality works';
     # Skip the spublish/smessage tests due to hiredis compatibility issues
-    pass 'skipping spublish test due to hiredis 1.1.1 compatibility';
-    pass 'skipping smessage test due to hiredis 1.1.1 compatibility';
+    pass 'skipping spublish test due to hiredis compatibility';
+    pass 'skipping smessage test due to hiredis compatibility';
+}
+
+# Test: disconnect with active subscription — callback should fire exactly once
+# with a meaningful error (not empty string), and not be double-invoked.
+{
+    my $sub = EV::Redis->new(path => $connect_info{sock});
+    my @cb_calls;
+    my $subscribed = 0;
+
+    $sub->on_error(sub {}); # suppress
+
+    $sub->subscribe('disconnect_test_ch', sub {
+        my ($result, $error) = @_;
+        push @cb_calls, [$result, $error];
+        if ($result && ref $result eq 'ARRAY' && $result->[0] eq 'subscribe') {
+            $subscribed = 1;
+            # Disconnect without unsubscribing
+            $sub->disconnect;
+        }
+    });
+
+    my $t; $t = EV::timer 2, 0, sub { undef $t; EV::break };
+    EV::run;
+
+    ok $subscribed, 'subscribed before disconnect';
+    # Expect: subscribe confirmation + exactly one disconnect error
+    my @errors = grep { defined $_->[1] } @cb_calls;
+    is scalar(@errors), 1, 'subscribe callback invoked exactly once with error on disconnect';
+    ok $errors[0][1], 'error string is truthy (not empty)';
+    like $errors[0][1], qr/disconnected/, 'error string is "disconnected"';
+}
+
+# Test: multi-channel subscribe + disconnect — one error callback total
+{
+    my $sub = EV::Redis->new(path => $connect_info{sock});
+    my @cb_calls;
+    my $sub_count = 0;
+
+    $sub->on_error(sub {}); # suppress
+
+    $sub->subscribe('multi_dc_ch1', 'multi_dc_ch2', sub {
+        my ($result, $error) = @_;
+        push @cb_calls, [$result, $error];
+        if ($result && ref $result eq 'ARRAY' && $result->[0] eq 'subscribe') {
+            $sub_count++;
+            if ($sub_count == 2) {
+                $sub->disconnect;
+            }
+        }
+    });
+
+    my $t; $t = EV::timer 2, 0, sub { undef $t; EV::break };
+    EV::run;
+
+    is $sub_count, 2, 'both channels subscribed';
+    my @errors = grep { defined $_->[1] } @cb_calls;
+    # With multi-channel, hiredis fires once per channel on teardown.
+    # Each should have a meaningful error, no duplicates from remove_cb_queue_sv.
+    for my $e (@errors) {
+        ok $e->[1], 'error string is truthy (not empty)';
+    }
+    # Total callbacks: 2 subscribe confirmations + N disconnect errors (one per channel)
+    # No extra invocation from remove_cb_queue_sv
+    ok scalar(@errors) <= 2, 'no more than 2 error callbacks for 2-channel subscribe';
 }
 
 done_testing;

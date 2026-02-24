@@ -1,2 +1,2 @@
-EV::Hiredis             T_PTROBJ
+EV::Redis               T_PTROBJ
 EV::Loop                T_PTROBJ

@@ -3,12 +3,12 @@ requires 'EV', '4.11';
 requires 'XSLoader', '0.02';
 
 on configure => sub {
+    requires 'ExtUtils::MakeMaker', '6.64';
     requires 'EV::MakeMaker';
-    requires 'Module::Build::XSUtil' => '>=0.02';
     requires 'File::Which';
 };
 
-on build => sub {
+on test => sub {
     requires 'Devel::Refcount';
     requires 'Test::Deep';
     requires 'Test::More', '0.98';
@@ -17,5 +17,8 @@ on build => sub {
 };
 
 on develop => sub {
-    requires 'Redis';
+    requires 'Test::Pod', '1.41';
+    requires 'Test::Spellunker', 'v0.2.7';
+    requires 'Test::MinimumVersion::Fast', '0.04';
+    requires 'Test::CPAN::Meta';
 };

@@ -5,7 +5,7 @@ use Time::HiRes qw(time);
 $| = 1; # Autoflush
 use Test::RedisServer;
 use EV;
-use EV::Hiredis;
+use EV::Redis;
 
 # Configuration
 my $NUM_COMMANDS  = $ENV{BENCH_COMMANDS}  // 10000;
@@ -21,7 +21,7 @@ my %connect_info = $redis_server->connect_info;
 my $value = 'x' x $VALUE_SIZE;
 
 print "=" x 60, "\n";
-print "EV::Hiredis Benchmark\n";
+print "EV::Redis Benchmark\n";
 print "=" x 60, "\n";
 print "Commands per test: $NUM_COMMANDS\n";
 print "Value size: $VALUE_SIZE bytes\n";
@@ -40,10 +40,13 @@ bench_set_get_roundtrip();
 # Benchmark 4: Mixed workload
 bench_mixed_workload();
 
-# Benchmark 5: Flow control impact (if max_pending set)
+# Benchmark 5: Fire-and-forget SET (no callback)
+bench_fire_and_forget();
+
+# Benchmark 6: Flow control impact (if max_pending set)
 bench_flow_control();
 
-# Benchmark 6: Large batch with waiting queue
+# Benchmark 7: Large batch with waiting queue
 bench_waiting_queue();
 
 # Cleanup
@@ -55,7 +58,7 @@ print "=" x 60, "\n";
 
 sub create_client {
     my %opts = @_;
-    return EV::Hiredis->new(
+    return EV::Redis->new(
         path => $connect_info{sock},
         on_error => sub { die "Redis error: @_" },
         %opts,
@@ -226,8 +229,33 @@ sub bench_mixed_workload {
     print "\n";
 }
 
+sub bench_fire_and_forget {
+    print "5. Fire-and-Forget SET (no callback overhead)\n";
+    print "-" x 40, "\n";
+
+    my $r = create_client(max_pending => $MAX_PENDING);
+    my $start = time();
+
+    for my $i (1 .. $NUM_COMMANDS) {
+        $r->set("bench:ff:$i", $value);
+    }
+
+    # Send a final command with callback to know when all prior commands
+    # have been processed by Redis (pipelining guarantees ordering).
+    $r->ping(sub { $r->disconnect });
+
+    EV::run;
+    my $elapsed = time() - $start;
+
+    print "  Completed: $NUM_COMMANDS commands\n";
+    print "  Time: ", format_time($elapsed), "\n";
+    print "  Rate: ", format_rate($NUM_COMMANDS, $elapsed), "\n";
+    print "  Avg latency: ", format_time($elapsed / $NUM_COMMANDS), "\n";
+    print "\n";
+}
+
 sub bench_flow_control {
-    print "5. Flow Control Comparison\n";
+    print "6. Flow Control Comparison\n";
     print "-" x 40, "\n";
 
     my @limits = (0, 100, 500, 1000);  # 0 = unlimited
@@ -258,7 +286,7 @@ sub bench_flow_control {
 }
 
 sub bench_waiting_queue {
-    print "6. Waiting Queue (max_pending=50, burst of commands)\n";
+    print "7. Waiting Queue (max_pending=50, burst of commands)\n";
     print "-" x 40, "\n";
 
     my $r = create_client(max_pending => 50);

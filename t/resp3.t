@@ -11,7 +11,9 @@ eval {
 my %connect_info = $redis_server->connect_info;
 
 use EV;
-use EV::Hiredis;
+use EV::Redis;
+use lib 't/lib';
+use RedisTestHelper qw(get_redis_version);
 
 # Helper to run a test with timeout
 sub run_with_timeout {
@@ -24,33 +26,13 @@ sub run_with_timeout {
     EV::run;
 }
 
-# Get Redis version
-my $redis_version = 0;
-my $redis_minor = 0;
-{
-    my $r = EV::Hiredis->new(path => $connect_info{sock});
-
-    run_with_timeout(2, sub {
-        $r->info('server', sub {
-            my ($info, $err) = @_;
-            if ($info && $info =~ /redis_version:(\d+)\.(\d+)/) {
-                $redis_version = $1;
-                $redis_minor = $2;
-            }
-            $r->disconnect;
-            EV::break;
-        });
-    });
-}
-
+my ($redis_version, $redis_minor) = get_redis_version($connect_info{sock});
 diag "Redis version: $redis_version.$redis_minor";
 
-SKIP: {
-    skip 'RESP3 tests require Redis 6+', 0 if $redis_version < 6;
-
+{
     # Test: REDIS_REPLY_DOUBLE via HINCRBYFLOAT
     {
-        my $r = EV::Hiredis->new(path => $connect_info{sock});
+        my $r = EV::Redis->new(path => $connect_info{sock});
         my $result;
 
         run_with_timeout(2, sub {
@@ -73,7 +55,7 @@ SKIP: {
     SKIP: {
         skip 'SET GET NX requires Redis 6.2+', 2 if $redis_version < 6 || ($redis_version == 6 && $redis_minor < 2);
 
-        my $r = EV::Hiredis->new(path => $connect_info{sock});
+        my $r = EV::Redis->new(path => $connect_info{sock});
         my @results;
 
         run_with_timeout(2, sub {
@@ -98,7 +80,7 @@ SKIP: {
 
     # Test: RESP3 protocol negotiation via HELLO 3
     SKIP: {
-        my $r = EV::Hiredis->new(path => $connect_info{sock});
+        my $r = EV::Redis->new(path => $connect_info{sock});
         my $hello_result;
         my $hello_error;
 
@@ -125,7 +107,7 @@ SKIP: {
 
     # Test: REDIS_REPLY_MAP via HGETALL with RESP3
     SKIP: {
-        my $r = EV::Hiredis->new(path => $connect_info{sock});
+        my $r = EV::Redis->new(path => $connect_info{sock});
         my $hello_ok = 0;
         my $result;
 
@@ -161,7 +143,7 @@ SKIP: {
 
     # Test: REDIS_REPLY_SET via SMEMBERS with RESP3
     SKIP: {
-        my $r = EV::Hiredis->new(path => $connect_info{sock});
+        my $r = EV::Redis->new(path => $connect_info{sock});
         my $hello_ok = 0;
         my $result;
 
@@ -197,7 +179,7 @@ SKIP: {
 
     # Test: REDIS_REPLY_BIGNUM via DEBUG PROTOCOL BIGNUM (if available)
     SKIP: {
-        my $r = EV::Hiredis->new(path => $connect_info{sock});
+        my $r = EV::Redis->new(path => $connect_info{sock});
         my $result;
         my $error;
 
@@ -218,7 +200,7 @@ SKIP: {
 
     # Test: REDIS_REPLY_VERB via DEBUG PROTOCOL VERBATIM (if available)
     SKIP: {
-        my $r = EV::Hiredis->new(path => $connect_info{sock});
+        my $r = EV::Redis->new(path => $connect_info{sock});
         my $result;
         my $error;
 
@@ -240,7 +222,7 @@ SKIP: {
 
 # Test: Basic RESP2 types work (baseline verification)
 {
-    my $r = EV::Hiredis->new(path => $connect_info{sock});
+    my $r = EV::Redis->new(path => $connect_info{sock});
     my @results;
 
     run_with_timeout(2, sub {
@@ -283,7 +265,7 @@ SKIP: {
 SKIP: {
     skip 'Requires Redis >= 6.0 for RESP3 push', 3 if $redis_version < 6;
 
-    my $r = EV::Hiredis->new(path => $connect_info{sock});
+    my $r = EV::Redis->new(path => $connect_info{sock});
     my @push_msgs;
     my $hello_ok = 0;
 
@@ -315,7 +297,7 @@ SKIP: {
                 # Read a key to track it
                 $r->get('push:test:key', sub {
                     # Use a second connection to modify the key
-                    my $r2 = EV::Hiredis->new(path => $connect_info{sock});
+                    my $r2 = EV::Redis->new(path => $connect_info{sock});
                     $r2->set('push:test:key', 'modified', sub {
                         $r2->disconnect;
                         # Give time for invalidation to arrive
@@ -336,6 +318,59 @@ SKIP: {
     ok scalar(@push_msgs) > 0, 'received PUSH message(s)';
     ok ref($push_msgs[0]) eq 'ARRAY', 'PUSH message is array ref';
     is $push_msgs[0][0], 'invalidate', 'PUSH message type is invalidate';
+}
+
+# Test: exception in on_push handler is caught and warned
+SKIP: {
+    skip 'Requires Redis >= 6.0 for RESP3 push', 2 if $redis_version < 6;
+
+    my $r = EV::Redis->new(path => $connect_info{sock});
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my $hello_ok = 0;
+
+    $r->on_push(sub {
+        die "intentional exception in push handler";
+    });
+
+    run_with_timeout(3, sub {
+        $r->hello(3, sub {
+            my ($res, $err) = @_;
+            if ($err) {
+                $r->disconnect;
+                EV::break;
+                return;
+            }
+            $hello_ok = 1;
+
+            $r->command('CLIENT', 'TRACKING', 'ON', 'BCAST', sub {
+                my ($res, $err) = @_;
+                if ($err) {
+                    $r->disconnect;
+                    EV::break;
+                    return;
+                }
+
+                $r->get('push:exception:key', sub {
+                    my $r2 = EV::Redis->new(path => $connect_info{sock});
+                    $r2->set('push:exception:key', 'modified', sub {
+                        $r2->disconnect;
+                        my $t; $t = EV::timer 0.2, 0, sub {
+                            undef $t;
+                            $r->on_push(undef);
+                            $r->disconnect;
+                            EV::break;
+                        };
+                    });
+                });
+            });
+        });
+    });
+
+    skip 'RESP3 not available', 2 unless $hello_ok;
+
+    ok scalar(@warnings) > 0, 'warning emitted for exception in push handler';
+    like $warnings[0], qr/exception in push handler/, 'warning message is correct';
 }
 
 done_testing;

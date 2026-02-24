@@ -12,9 +12,9 @@ eval {
 my %connect_info = $redis_server->connect_info;
 
 use EV;
-use EV::Hiredis;
+use EV::Redis;
 
-my $r = EV::Hiredis->new( path => $connect_info{sock} );
+my $r = EV::Redis->new( path => $connect_info{sock} );
 my ($get_command, $test);
 my $result;
 $get_command = sub {
@@ -37,7 +37,7 @@ EV::run;
 
 # Test: callback cleanup on Redis error responses
 {
-    my $r2 = EV::Hiredis->new( path => $connect_info{sock} );
+    my $r2 = EV::Redis->new( path => $connect_info{sock} );
     my $error_result;
     my $error_msg;
 
@@ -61,7 +61,7 @@ pass 'no leak on Redis error response callback';
     my @warnings;
     local $SIG{__WARN__} = sub { push @warnings, $_[0] };
 
-    my $r3 = EV::Hiredis->new(
+    my $r3 = EV::Redis->new(
         path => $connect_info{sock},
         on_error => sub { }, # suppress default die
     );
@@ -88,7 +88,7 @@ pass 'no leak when callback throws exception';
 
 # Test: callback cleanup on command timeout
 {
-    my $r4 = EV::Hiredis->new(
+    my $r4 = EV::Redis->new(
         path => $connect_info{sock},
         on_error => sub { }, # suppress default die
         command_timeout => 100, # 100ms timeout
@@ -126,7 +126,7 @@ pass 'no leak on command timeout callback';
     my $callback_error;
 
     {
-        my $r5 = EV::Hiredis->new(
+        my $r5 = EV::Redis->new(
             path => $connect_info{sock},
             on_error => sub { },
         );
@@ -158,7 +158,7 @@ pass 'no crash when destroying with pending commands';
     my @callbacks_called;
 
     {
-        my $r6 = EV::Hiredis->new(
+        my $r6 = EV::Redis->new(
             path => $connect_info{sock},
             max_pending => 1,
             on_error => sub { },
@@ -195,7 +195,7 @@ pass 'no crash when destroying with waiting queue';
     my @callbacks_called;
 
     {
-        my $r7 = EV::Hiredis->new(
+        my $r7 = EV::Redis->new(
             path => $connect_info{sock},
             on_error => sub { },
         );
@@ -228,7 +228,7 @@ pass 'skip_pending before destruction works correctly';
 {
     my $destroyed = 0;
     {
-        my $r8 = EV::Hiredis->new(
+        my $r8 = EV::Redis->new(
             path => $connect_info{sock},
             on_error => sub { },
         );
