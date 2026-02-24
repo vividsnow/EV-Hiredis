@@ -59,6 +59,16 @@ is(EV::Hiredis->has_ssl, 1, 'has_ssl returns 1 when compiled with TLS');
     is($@, '', 'SSL context with system defaults succeeds');
 }
 
+# Test: SSL context creation with tls_capath (directory of CA certs)
+# OpenSSL silently accepts nonexistent CApath dirs, so just verify it doesn't croak
+{
+    my $r = EV::Hiredis->new();
+    eval {
+        $r->_setup_ssl_context(undef, '/tmp', undef, undef, undef);
+    };
+    is($@, '', 'SSL context with tls_capath directory succeeds');
+}
+
 # Test: cert without key croaks
 {
     my $r = EV::Hiredis->new();
@@ -279,6 +289,33 @@ END {
 
     is($connected, 1, 'TLS with tls_verify => 0 connects without CA');
     is($error, 0, 'no error with tls_verify => 0');
+}
+
+# Test: TLS connection with tls_capath (directory containing CA cert)
+{
+    # OpenSSL CApath requires hashed symlinks; create them
+    my $cadir = tempdir(CLEANUP => 1);
+    my $hash = `openssl x509 -hash -noout -in $ca_cert 2>/dev/null`;
+    chomp $hash;
+    symlink($ca_cert, "$cadir/$hash.0") if $hash;
+
+    SKIP: {
+        skip 'could not create CA hash symlink', 2 unless $hash && -l "$cadir/$hash.0";
+
+        my ($connected, $error) = (0, 0);
+        my $r = EV::Hiredis->new(
+            host       => '127.0.0.1',
+            port       => $tls_port,
+            tls        => 1,
+            tls_capath => $cadir,
+        );
+        $r->on_error(sub { $error++; $r->disconnect });
+        $r->on_connect(sub { $connected++; $r->disconnect });
+        EV::run;
+
+        is($connected, 1, 'TLS connection with tls_capath succeeds');
+        is($error, 0, 'no error with tls_capath');
+    }
 }
 
 # Test: TLS constructor with invalid CA cert croaks at construction time

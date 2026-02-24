@@ -5,46 +5,36 @@ EV::Hiredis - Asynchronous redis client using hiredis and EV
 # SYNOPSIS
 
     use EV::Hiredis;
-
+    
     my $redis = EV::Hiredis->new;
     $redis->connect('127.0.0.1');
-
+    
     # or
     my $redis = EV::Hiredis->new( host => '127.0.0.1' );
-
+    
     # command
     $redis->set('foo' => 'bar', sub {
         my ($res, $err) = @_;
-
+    
         print $res; # OK
-
+    
         $redis->get('foo', sub {
             my ($res, $err) = @_;
-
+    
             print $res; # bar
-
+    
             $redis->disconnect;
         });
     });
-
+    
     # start main loop
     EV::run;
 
 # DESCRIPTION
 
-EV::Hiredis is a asynchronous client for Redis using hiredis and [EV](https://metacpan.org/pod/EV) as backend.
+EV::Hiredis is an asynchronous client for Redis using hiredis and [EV](https://metacpan.org/pod/EV) as backend.
 
-This module connected to [EV](https://metacpan.org/pod/EV) with C-Level interface so that it runs faster.
-
-# FEATURES
-
-- Automatic reconnection with configurable delay and max attempts
-- Flow control with local command queuing (`max_pending`, `waiting_timeout`)
-- TLS/SSL support (optional, auto-detected at build time)
-- RESP3 push messages and reply types (Redis 6.0+)
-- Connection and command timeouts
-- TCP keepalive, SO\_REUSEADDR, SOCK\_CLOEXEC socket options
-- IPv4/IPv6 preference and source address binding
+This module connects to [EV](https://metacpan.org/pod/EV) with C-level interface so that it runs faster.
 
 # ANYEVENT INTEGRATION
 
@@ -57,10 +47,10 @@ Unlike other redis modules, this module doesn't support utf-8 string.
 This module handle all variables as bytes. You should encode your utf-8 string before passing commands like following:
 
     use Encode;
-
+    
     # set $val
     $redis->set(foo => encode_utf8 $val, sub { ... });
-
+    
     # get $val
     $redis->get(foo, sub {
         my $val = decode_utf8 $_[0];
@@ -74,159 +64,182 @@ Create new [EV::Hiredis](https://metacpan.org/pod/EV%3A%3AHiredis) instance.
 
 Available `%options` are:
 
-### Connection
-
-- **host** => 'Str'
-- **port** => 'Int'
+- host => 'Str'
+- port => 'Int'
 
     Hostname and port number of redis-server to connect. Mutually exclusive with `path`.
 
-- **path** => 'Str'
+- path => 'Str'
 
     UNIX socket path to connect. Mutually exclusive with `host`.
 
-- **connect\_timeout** => $num\_of\_milliseconds
-
-    Connection timeout.
-
-- **command\_timeout** => $num\_of\_milliseconds
-
-    Command timeout.
-
-- **loop** => 'EV::loop'
-
-    EV loop for running this instance. Default is `EV::default_loop`.
-
-### Callbacks
-
-- **on\_error** => $cb->($errstr)
+- on\_error => $cb->($errstr)
 
     Error callback will be called when a connection level error occurs.
+    If not provided (or `undef`), a default handler that calls `die` is
+    installed. To have no error handler, call `$obj->on_error(undef)`
+    after construction.
 
     This callback can be set by `$obj->on_error($cb)` method any time.
 
-- **on\_connect** => $cb->()
+- on\_connect => $cb->()
 
     Connection callback will be called when connection successful and completed to redis server.
 
     This callback can be set by `$obj->on_connect($cb)` method any time.
 
-- **on\_disconnect** => $cb->()
+- on\_disconnect => $cb->()
 
     Disconnect callback will be called when disconnection occurs (both normal and error cases).
 
     This callback can be set by `$obj->on_disconnect($cb)` method any time.
 
-- **on\_push** => $cb->($reply)
+- on\_push => $cb->($reply)
 
     RESP3 push callback for server-initiated out-of-band messages (Redis 6.0+).
-    Called with the decoded push message (an array reference).
+    Called with the decoded push message (an array reference). This enables
+    client-side caching invalidation and other server-push features.
 
-### Reconnection
+    This callback can be set by `$obj->on_push($cb)` method any time.
 
-- **reconnect** => $bool
+- connect\_timeout => $num\_of\_milliseconds
 
-    Enable automatic reconnection on connection failure or unexpected disconnection. Default is disabled.
+    Connection timeout.
 
-- **reconnect\_delay** => $num\_of\_milliseconds
+- command\_timeout => $num\_of\_milliseconds
 
-    Delay between reconnection attempts. Default is 1000 (1 second).
+    Command timeout.
 
-- **max\_reconnect\_attempts** => $num
-
-    Maximum number of reconnection attempts. 0 means unlimited. Default is 0.
-
-### Flow Control
-
-- **max\_pending** => $num
+- max\_pending => $num
 
     Maximum number of commands sent to Redis concurrently. When this limit is reached,
     additional commands are queued locally and sent as responses arrive.
-    0 means unlimited (default).
+    0 means unlimited (default). Use `waiting_count` to check the local queue size.
 
-- **waiting\_timeout** => $num\_of\_milliseconds
+- waiting\_timeout => $num\_of\_milliseconds
 
     Maximum time a command can wait in the local queue before being cancelled with
     "waiting timeout" error. 0 means unlimited (default).
 
-- **resume\_waiting\_on\_reconnect** => $bool
+- resume\_waiting\_on\_reconnect => $bool
 
-    If true, waiting commands are preserved on disconnect and resumed after successful
-    reconnection. Default is false (cancelled on disconnect).
+    Controls behavior of waiting queue on disconnect. If false (default), waiting
+    commands are cancelled with error on disconnect. If true, waiting commands are
+    preserved and resumed after successful reconnection.
 
-### Socket Options
+- reconnect => $bool
 
-- **keepalive** => $seconds
+    Enable automatic reconnection on connection failure or unexpected disconnection.
+    Default is disabled (0).
 
-    TCP keepalive interval. 0 means disabled (default).
+- reconnect\_delay => $num\_of\_milliseconds
 
-- **cloexec** => $bool
+    Delay between reconnection attempts. Default is 1000 (1 second).
 
-    Set SOCK\_CLOEXEC on the socket. Enabled by default.
+- max\_reconnect\_attempts => $num
 
-- **reuseaddr** => $bool
+    Maximum number of reconnection attempts. 0 means unlimited. Default is 0.
+    Negative values are treated as 0 (unlimited).
 
-    Set SO\_REUSEADDR on the socket. Disabled by default.
+- priority => $num
 
-- **prefer\_ipv4** => $bool
+    Priority for the underlying libev IO watchers. Higher priority watchers are
+    invoked before lower priority ones. Valid range is -2 (lowest) to +2 (highest),
+    with 0 being the default. See [EV](https://metacpan.org/pod/EV) documentation for details on priorities.
 
-    Prefer IPv4 addresses when resolving hostnames.
+- keepalive => $seconds
 
-- **prefer\_ipv6** => $bool
+    Enable TCP keepalive with the specified interval in seconds. When enabled,
+    the OS will periodically send probes on idle connections to detect dead peers.
+    0 means disabled (default). Recommended for long-lived connections behind
+    NAT gateways or firewalls.
 
-    Prefer IPv6 addresses when resolving hostnames.
+- prefer\_ipv4 => $bool
 
-- **source\_addr** => 'Str'
+    Prefer IPv4 addresses when resolving hostnames. Mutually exclusive with
+    `prefer_ipv6`.
 
-    Local address to bind the outbound connection to.
+- prefer\_ipv6 => $bool
 
-- **tcp\_user\_timeout** => $num\_of\_milliseconds
+    Prefer IPv6 addresses when resolving hostnames. Mutually exclusive with
+    `prefer_ipv4`.
 
-    TCP\_USER\_TIMEOUT socket option (Linux-specific).
+- source\_addr => 'Str'
 
-- **priority** => $num
+    Local address to bind the outbound connection to. Useful on multi-homed
+    servers to select a specific network interface.
 
-    Priority for the underlying libev IO watchers. Range: -2 to +2. Default is 0.
+- tcp\_user\_timeout => $num\_of\_milliseconds
 
-### TLS
+    Set the TCP\_USER\_TIMEOUT socket option (Linux-specific). Controls how long
+    transmitted data may remain unacknowledged before the connection is dropped.
+    Helps detect dead connections faster on lossy networks.
 
-Requires TLS support compiled in (auto-detected at build time via OpenSSL). Check with `EV::Hiredis->has_ssl`.
+- cloexec => $bool
 
-- **tls** => $bool
+    Set SOCK\_CLOEXEC on the Redis connection socket. Prevents the file descriptor
+    from leaking to child processes after fork/exec. Default is enabled.
 
-    Enable TLS encryption. Only valid with `host` connections, not `path`.
+- reuseaddr => $bool
 
-- **tls\_ca** => 'Str'
+    Set SO\_REUSEADDR on the Redis connection socket. Allows rebinding to an
+    address that is still in TIME\_WAIT state. Default is disabled.
 
-    Path to CA certificate file. Uses system default if omitted.
+- tls => $bool
 
-- **tls\_cert** => 'Str'
+    Enable TLS/SSL encryption for the connection. Requires that the module was
+    built with TLS support (auto-detected at build time, or forced with
+    `EV_HIREDIS_SSL=1`). Only valid with `host` connections, not `path`.
 
-    Path to client certificate for mutual TLS.
+- tls\_ca => 'Str'
 
-- **tls\_key** => 'Str'
+    Path to CA certificate file for server verification. If not specified,
+    uses the system default CA store.
 
-    Path to client private key for mutual TLS.
+- tls\_capath => 'Str'
 
-- **tls\_server\_name** => 'Str'
+    Path to a directory containing CA certificate files in OpenSSL-compatible
+    format (hashed filenames). Alternative to `tls_ca` for multiple CA certs.
 
-    Server name for SNI.
+- tls\_cert => 'Str'
+
+    Path to client certificate file for mutual TLS authentication. Must be
+    specified together with `tls_key`.
+
+- tls\_key => 'Str'
+
+    Path to client private key file. Must be specified together with `tls_cert`.
+
+- tls\_server\_name => 'Str'
+
+    Server name for SNI (Server Name Indication). Optional.
+
+- tls\_verify => $bool
+
+    Enable or disable TLS peer verification. Default is true (verify).
+    Set to false to accept self-signed certificates (not recommended for
+    production).
+
+- loop => 'EV::Loop',
+
+    EV loop for running this instance. Default is `EV::default_loop`.
 
 All parameters are optional.
 
 If parameters about connection (host&port or path) is not passed, you should call `connect` or `connect_unix` method by hand to connect to redis-server.
 
-## connect($hostname, $port)
+## connect($hostname \[, $port\])
 
 ## connect\_unix($path)
 
-Connect to a redis-server for `$hostname:$port` or `$path`.
+Connect to a redis-server for `$hostname:$port` or `$path`. `$port`
+defaults to 6379. Croaks if a connection is already active.
 
-on\_connect callback will be called if connection is successful, otherwise on\_error callback is called.
+## command($commands..., \[$cb->($result, $error)\])
 
-## command($commands..., $cb->($result, $error))
-
-Do a redis command and return its result by callback.
+Do a redis command and return its result by callback. Returns `REDIS_OK`
+(0) on success or `REDIS_ERR` (-1) if the command could not be enqueued
+(the error is also delivered via callback, so the return value is rarely needed).
 
     $redis->command('get', 'foo', sub {
         my ($result, $error) = @_;
@@ -238,7 +251,16 @@ Do a redis command and return its result by callback.
 If any error is occurred, `$error` presents the error message and `$result` is undef.
 If no error, `$error` is undef and `$result` presents response from redis.
 
-NOTE: Alternatively all commands can be called via AUTOLOAD interface.
+The callback is optional. Without a callback, the command runs in
+fire-and-forget mode: the reply from Redis is silently discarded and errors
+are not reported to Perl code (connection-level errors still trigger
+`on_error`). This is useful for high-volume writes where individual
+acknowledgement is not needed:
+
+    $redis->set('counter', 42);  # fire-and-forget, no callback
+
+NOTE: Alternatively all commands can be called via AUTOLOAD interface,
+including fire-and-forget:
 
     $redis->command('get', 'foo', sub { ... });
 
@@ -246,75 +268,247 @@ is equivalent to:
 
     $redis->get('foo', sub { ... });
 
+    $redis->set('counter', 42);  # fire-and-forget via AUTOLOAD
+
+**Note:** Calling `command()` while not connected will croak with
+"connection required before calling command", unless automatic reconnection
+is active (reconnect timer running). In that case, commands are
+automatically queued and sent after successful reconnection. Queued
+commands respect `waiting_timeout` if set.
+
+**Pub/Sub note:** For `subscribe`, `psubscribe`, and `ssubscribe`, the
+callback is persistent and receives all messages. For `unsubscribe`,
+`punsubscribe`, and `sunsubscribe`, the confirmation is delivered through
+the original subscribe callback (this is hiredis behavior). The unsubscribe
+command's own callback will only fire with a disconnect error when the
+connection closes.
+
 ## disconnect
 
-Disconnect from redis-server. This method is usable for exiting event loop.
+Disconnect from redis-server. Safe to call when already disconnected (no-op).
+Stops any pending reconnect timer, so explicit disconnect prevents automatic
+reconnection. When called while already disconnected, also clears any
+waiting commands (e.g., preserved by `resume_waiting_on_reconnect`).
+This method is usable for exiting event loop.
 
 ## is\_connected
 
-Returns true (1) if connected to redis-server, false (0) otherwise.
+Returns true (1) if a connection context is active (including while the
+connection is being established), false (0) otherwise.
 
 ## has\_ssl
 
-Class method. Returns true (1) if the module was built with TLS support, false (0) otherwise.
+Class method. Returns true (1) if the module was built with TLS support,
+false (0) otherwise.
+
+    if (EV::Hiredis->has_ssl) {
+        # TLS connections are available
+    }
+
+## connect\_timeout(\[$ms\])
+
+Get or set the connection timeout in milliseconds. Returns the current value,
+or undef if not set. Can also be set via constructor.
+
+## command\_timeout(\[$ms\])
+
+Get or set the command timeout in milliseconds. Returns the current value,
+or undef if not set. Can also be set via constructor. When changed while
+connected, takes effect immediately on the active connection.
+
+## on\_error(\[$cb->($errstr)\])
+
+Set error callback. With a CODE reference argument, replaces the handler
+and returns the new handler. With `undef` or without arguments, clears
+the handler and returns undef.
+
+**Note:** Calling without arguments clears the handler. There is no way to
+read the current handler without clearing it. This applies to all handler
+methods (`on_error`, `on_connect`, `on_disconnect`, `on_push`).
+
+## on\_connect(\[$cb->()\])
+
+Set connect callback. With a CODE reference argument, replaces the handler
+and returns the new handler. With `undef` or without arguments, clears
+the handler and returns undef.
+
+## on\_disconnect(\[$cb->()\])
+
+Set disconnect callback, called on both normal and error disconnections.
+With a CODE reference argument, replaces the handler and returns the new
+handler. With `undef` or without arguments, clears the handler and
+returns undef.
+
+## on\_push(\[$cb->($reply)\])
+
+Set RESP3 push callback for server-initiated messages (Redis 6.0+).
+The callback receives the decoded push message as an array reference.
+With a CODE reference argument, replaces the handler and returns the new
+handler. With `undef` or without arguments, clears the handler and
+returns undef. When changed while connected, takes effect immediately.
+
+    $redis->on_push(sub {
+        my ($msg) = @_;
+        # $msg is an array ref, e.g. ['invalidate', ['key1', 'key2']]
+    });
 
 ## reconnect($enable, $delay\_ms, $max\_attempts)
 
 Configure automatic reconnection.
 
-    $redis->reconnect(1);                    # enable with defaults
+    $redis->reconnect(1);                    # enable with defaults (1s delay, unlimited)
+    $redis->reconnect(1, 0);                 # enable with immediate reconnect
     $redis->reconnect(1, 2000);              # enable with 2 second delay
     $redis->reconnect(1, 1000, 5);           # enable with 1s delay, max 5 attempts
     $redis->reconnect(0);                    # disable
 
+`$delay_ms` defaults to 1000 (1 second). 0 means immediate reconnect.
+`$max_attempts` defaults to 0 (unlimited).
+
+When enabled, the client will automatically attempt to reconnect on connection
+failure or unexpected disconnection. Intentional `disconnect()` calls will
+not trigger reconnection.
+
+## reconnect\_enabled
+
+Returns true (1) if automatic reconnection is enabled, false (0) otherwise.
+
+## pending\_count
+
+Returns the number of commands sent to Redis awaiting responses.
+Persistent commands (subscribe, psubscribe, ssubscribe, monitor) are not
+included in this count.
+When called from inside a command callback, the count includes the
+current command (it is decremented after the callback returns).
+
+## waiting\_count
+
+Returns the number of commands queued locally (not yet sent to Redis).
+These are commands that exceeded the `max_pending` limit.
+
+## max\_pending($limit)
+
+Get or set the maximum number of concurrent commands sent to Redis.
+Persistent commands (subscribe, psubscribe, ssubscribe, monitor) are not
+subject to this limit.
+0 means unlimited (default). When the limit is reached, additional commands
+are queued locally and sent as responses arrive.
+
+## waiting\_timeout($ms)
+
+Get or set the maximum time in milliseconds a command can wait in the local queue.
+Commands exceeding this timeout are cancelled with "waiting timeout" error.
+0 means unlimited (default). Returns the current value as an integer (0 when unset).
+
+## resume\_waiting\_on\_reconnect($bool)
+
+Get or set whether waiting commands are preserved on disconnect and resumed
+after reconnection. Default is false (waiting commands cancelled on disconnect).
+
+## priority($priority)
+
+Get or set the priority for the underlying libev IO watchers. Higher priority
+watchers are invoked before lower priority ones when multiple watchers are
+pending. Valid range is -2 (lowest) to +2 (highest), with 0 being the default.
+Values outside this range are clamped automatically.
+Can be changed at any time, including while connected.
+
+    $redis->priority(1);     # higher priority
+    $redis->priority(-1);    # lower priority
+    $redis->priority(99);    # clamped to 2
+    my $prio = $redis->priority;  # get current priority
+
+## keepalive($seconds)
+
+Get or set the TCP keepalive interval in seconds. When set, the OS sends
+periodic probes on idle connections to detect dead peers. 0 means disabled
+(default). When set to a positive value while connected, takes effect
+immediately. Setting to 0 while connected records the preference for future
+connections but does not disable keepalives on the current socket.
+
+## prefer\_ipv4($bool)
+
+Get or set IPv4 preference for DNS resolution. Mutually exclusive with
+`prefer_ipv6` (setting one clears the other). Takes effect on the next
+connection.
+
+## prefer\_ipv6($bool)
+
+Get or set IPv6 preference for DNS resolution. Mutually exclusive with
+`prefer_ipv4` (setting one clears the other). Takes effect on the next
+connection.
+
+## source\_addr($addr)
+
+Get or set the local source address to bind to when connecting. This is
+useful on multi-homed hosts to control which network interface is used.
+Pass `undef` to clear. Takes effect on the next TCP connection (has no
+effect on Unix socket connections).
+
+## tcp\_user\_timeout($ms)
+
+Get or set the TCP user timeout in milliseconds. This controls how long
+transmitted data may remain unacknowledged before the connection is dropped.
+0 means use the OS default. Takes effect on the next connection.
+
+## cloexec($bool)
+
+Get or set the close-on-exec flag for the Redis socket. When enabled, the
+socket is automatically closed in child processes after fork+exec. Enabled
+by default. Takes effect on the next connection.
+
+## reuseaddr($bool)
+
+Get or set SO\_REUSEADDR on the Redis socket. Allows rebinding to an address
+still in TIME\_WAIT state. Disabled by default. Takes effect on the next
+connection.
+
 ## skip\_waiting
 
-Cancel only waiting (not yet sent) command callbacks. Each callback is invoked with `(undef, "skipped")`.
+Cancel only waiting (not yet sent) command callbacks. Each callback is invoked
+with `(undef, "skipped")`. In-flight commands continue normally.
 
 ## skip\_pending
 
-Cancel all pending and waiting command callbacks. Each callback is invoked with `(undef, "skipped")`.
+Cancel all pending and waiting command callbacks. Each Perl callback is
+invoked immediately with `(undef, "skipped")`. For pending commands,
+the internal hiredis tracking entry remains until a reply arrives (which
+is then discarded); no second callback fires.
 
-## on\_error(\[$cb->($errstr)\])
+## can($method)
 
-Set error callback. With `undef` or without arguments, clears the handler.
+Returns code reference if method is available, undef otherwise.
+Methods installed via AUTOLOAD (Redis commands) will return true after first call.
 
-## on\_connect(\[$cb->()\])
+# DESTRUCTION BEHAVIOR
 
-Set connect callback. With `undef` or without arguments, clears the handler.
+When an EV::Hiredis object is destroyed (goes out of scope or is explicitly
+undefined) while commands are still pending or waiting, hiredis invokes all
+pending command callbacks with a disconnect error, and EV::Hiredis invokes
+all waiting queue callbacks with `"disconnected"`. This ensures callbacks
+are not orphaned.
 
-## on\_disconnect(\[$cb->()\])
+For predictable cleanup, explicitly disconnect before destruction:
 
-Set disconnect callback. With `undef` or without arguments, clears the handler.
+    $redis->disconnect;    # Clean disconnect, callbacks get error
+    undef $redis;          # Safe to destroy
 
-## on\_push(\[$cb->($reply)\])
+Or use skip methods to cancel with a specific error message:
 
-Set RESP3 push callback for server-initiated messages (Redis 6.0+).
+    $redis->skip_pending;  # Invokes callbacks with (undef, "skipped")
+    $redis->skip_waiting;
+    $redis->disconnect;
+    undef $redis;
 
-# RECONNECTION EXAMPLE
+**Circular references:** If your callbacks close over the `$redis` variable,
+this creates a reference cycle (`$redis` -> object -> callback -> `$redis`)
+that prevents garbage collection. Break the cycle before the object goes out
+of scope by clearing callbacks:
 
-    my $redis = EV::Hiredis->new(
-        host                       => '127.0.0.1',
-        reconnect                  => 1,
-        reconnect_delay            => 2000,
-        max_reconnect_attempts     => 10,
-        resume_waiting_on_reconnect => 1,
-        on_connect    => sub { warn "connected\n" },
-        on_disconnect => sub { warn "disconnected\n" },
-        on_error      => sub { warn "error: $_[0]\n" },
-    );
-
-# TLS EXAMPLE
-
-    my $redis = EV::Hiredis->new(
-        host            => 'redis.example.com',
-        port            => 6380,
-        tls             => 1,
-        tls_ca          => '/path/to/ca.crt',
-        tls_cert        => '/path/to/client.crt',
-        tls_key         => '/path/to/client.key',
-        tls_server_name => 'redis.example.com',
-    );
+    $redis->on_error(undef);
+    $redis->on_connect(undef);
+    $redis->on_disconnect(undef);
+    $redis->on_push(undef);
 
 # AUTHOR
 

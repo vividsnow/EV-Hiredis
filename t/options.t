@@ -5,6 +5,8 @@ use Test::RedisServer;
 
 use EV;
 use EV::Hiredis;
+use lib 't/lib';
+use RedisTestHelper qw(get_redis_version);
 
 my $redis_server;
 eval {
@@ -32,6 +34,9 @@ my %connect_info = $redis_server->connect_info;
 {
     eval { EV::Hiredis->new->keepalive(-1) };
     like $@, qr/non-negative/, 'keepalive rejects negative';
+
+    eval { EV::Hiredis->new->keepalive(2_000_001) };
+    like $@, qr/too large/, 'keepalive rejects too large';
 }
 
 # keepalive set while connected
@@ -194,20 +199,7 @@ my %connect_info = $redis_server->connect_info;
 # --- on_push live registration/deregistration ---
 
 SKIP: {
-    # Get Redis version
-    my $redis_version = 0;
-    {
-        my $r = EV::Hiredis->new(path => $connect_info{sock});
-        $r->info('server', sub {
-            my ($info, $err) = @_;
-            if ($info && $info =~ /redis_version:(\d+)/) {
-                $redis_version = $1;
-            }
-            $r->disconnect;
-        });
-        EV::run;
-    }
-
+    my ($redis_version) = get_redis_version($connect_info{sock});
     skip 'on_push live test requires Redis 6+', 2 if $redis_version < 6;
 
     my $r = EV::Hiredis->new(path => $connect_info{sock});
