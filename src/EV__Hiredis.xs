@@ -25,6 +25,10 @@ typedef struct ev_loop* EV__Loop;
 #define EV_HIREDIS_MAGIC 0xDEADBEEF
 #define EV_HIREDIS_FREED 0xFEEDFACE
 
+/* Release an SV handler field (error_handler, connect_handler, etc.) */
+#define CLEAR_HANDLER(field) \
+    do { if (NULL != (field)) { SvREFCNT_dec(field); (field) = NULL; } } while(0)
+
 struct ev_hiredis_s {
     unsigned int magic;  /* Set to EV_HIREDIS_MAGIC when alive */
     struct ev_loop* loop;
@@ -58,7 +62,8 @@ struct ev_hiredis_s {
     int reconnect_timer_active;
     int intentional_disconnect; /* set before explicit disconnect() */
     int priority; /* libev watcher priority, default 0 */
-    int in_cleanup; /* set during remove_cb_queue_sv to prevent re-entrant modification */
+    int in_cb_cleanup; /* prevent re-entrant cb_queue modification */
+    int in_wait_cleanup; /* prevent re-entrant wait_queue modification */
     int callback_depth; /* nesting depth of C-level callbacks invoking Perl code */
     int keepalive; /* TCP keepalive interval in seconds, 0 = disabled */
     int prefer_ipv4; /* prefer IPv4 DNS resolution */
@@ -78,6 +83,7 @@ struct ev_hiredis_cb_s {
     ngx_queue_t queue;
     int persist;
     int skipped;
+    int sub_count; /* subscription channels remaining (for persistent commands) */
 };
 
 struct ev_hiredis_wait_s {
@@ -105,20 +111,36 @@ static int is_persistent_command(const char* cmd) {
 
     /* Fast path: check first character (case-insensitive) */
     if (c == 's' || c == 'S') {
-        /* Could be subscribe or ssubscribe */
         if (0 == strcasecmp(cmd, "subscribe")) return 1;
         if (0 == strcasecmp(cmd, "ssubscribe")) return 1;
         return 0;
     }
     if (c == 'p' || c == 'P') {
-        /* Could be psubscribe */
         return (0 == strcasecmp(cmd, "psubscribe"));
     }
     if (c == 'm' || c == 'M') {
-        /* Could be monitor */
         return (0 == strcasecmp(cmd, "monitor"));
     }
 
+    return 0;
+}
+
+/* Detect unsubscribe-type replies that indicate end of a subscription channel.
+ * Format: [type_string, channel, remaining_count]
+ * Returns 1 if the reply is an unsubscribe/punsubscribe/sunsubscribe message. */
+static int is_unsub_reply(redisReply* reply) {
+    const char* s;
+
+    if (reply->type != REDIS_REPLY_ARRAY && reply->type != REDIS_REPLY_PUSH) return 0;
+    if (reply->elements < 3) return 0;
+    if (NULL == reply->element[0]) return 0;
+    if (reply->element[0]->type != REDIS_REPLY_STRING &&
+        reply->element[0]->type != REDIS_REPLY_STATUS) return 0;
+
+    s = reply->element[0]->str;
+    if (s[0] == 'u' || s[0] == 'U') return (0 == strcasecmp(s, "unsubscribe"));
+    if (s[0] == 'p' || s[0] == 'P') return (0 == strcasecmp(s, "punsubscribe"));
+    if (s[0] == 's' || s[0] == 'S') return (0 == strcasecmp(s, "sunsubscribe"));
     return 0;
 }
 
@@ -155,6 +177,7 @@ static void invoke_callback_error(SV* cb, SV* error_sv) {
     ENTER;
     SAVETMPS;
     PUSHMARK(SP);
+    EXTEND(SP, 2);
     PUSHs(&PL_sv_undef);
     PUSHs(error_sv);
     PUTBACK;
@@ -173,14 +196,22 @@ static int check_destroyed(EV__Hiredis self) {
     if (self->magic == EV_HIREDIS_FREED &&
         self->callback_depth == 0 &&
         self->current_cb == NULL) {
-        if (self->ac_saved != NULL) {
-            self->ac_saved->data = NULL;
-            self->ac_saved = NULL;
-        }
         Safefree(self);
         return 1;
     }
     return 0;
+}
+
+/* Free C-allocated fields (used by both PL_dirty and normal DESTROY paths) */
+static void free_c_fields(EV__Hiredis self) {
+    if (NULL != self->host) { Safefree(self->host); self->host = NULL; }
+    if (NULL != self->path) { Safefree(self->path); self->path = NULL; }
+    if (NULL != self->source_addr) { Safefree(self->source_addr); self->source_addr = NULL; }
+    if (NULL != self->connect_timeout) { Safefree(self->connect_timeout); self->connect_timeout = NULL; }
+    if (NULL != self->command_timeout) { Safefree(self->command_timeout); self->command_timeout = NULL; }
+#ifdef EV_HIREDIS_SSL
+    if (NULL != self->ssl_ctx) { redisFreeSSLContext(self->ssl_ctx); self->ssl_ctx = NULL; }
+#endif
 }
 
 /* Timer stop helpers to reduce code duplication */
@@ -248,15 +279,17 @@ static SV* handler_accessor(SV** handler_ptr, SV* handler, int has_handler_arg) 
         : &PL_sv_undef;
 }
 
-/* Optimized version using pre-allocated SV error message.
- * Uses in_cleanup flag to prevent re-entrant queue modification from
+/* Uses in_cb_cleanup flag to prevent re-entrant queue modification from
  * user callbacks (e.g., if callback calls skip_pending). */
 static void remove_cb_queue_sv(EV__Hiredis self, SV* error_sv) {
     ngx_queue_t* q;
     ev_hiredis_cb_t* cbt;
-    int was_in_cleanup = self->in_cleanup;
 
-    self->in_cleanup = 1;
+    if (self->in_cb_cleanup) {
+        return;
+    }
+
+    self->in_cb_cleanup = 1;
 
     /* Use while loop with re-fetch of head each iteration.
      * This is safe against re-entrant modifications because we
@@ -276,7 +309,7 @@ static void remove_cb_queue_sv(EV__Hiredis self, SV* error_sv) {
         }
 
         ngx_queue_remove(q);
-        self->pending_count--;
+        if (!cbt->persist) self->pending_count--;
 
         if (NULL != cbt->cb) {
             if (NULL != error_sv) {
@@ -287,7 +320,7 @@ static void remove_cb_queue_sv(EV__Hiredis self, SV* error_sv) {
         Safefree(cbt);
     }
 
-    self->in_cleanup = was_in_cleanup;
+    self->in_cb_cleanup = 0;
 }
 
 static void free_wait_entry(ev_hiredis_wait_t* wt) {
@@ -303,15 +336,18 @@ static void free_wait_entry(ev_hiredis_wait_t* wt) {
     Safefree(wt);
 }
 
-/* Optimized version using pre-allocated SV error message */
+/* Uses in_wait_cleanup flag to prevent re-entrant queue modification. */
 static void clear_wait_queue_sv(EV__Hiredis self, SV* error_sv) {
     ngx_queue_t* q;
     ev_hiredis_wait_t* wt;
-    int was_in_cleanup = self->in_cleanup;
+
+    if (self->in_wait_cleanup) {
+        return;
+    }
 
     /* Protect against re-entrancy: if a callback invokes skip_waiting() or
      * skip_pending(), they should no-op since we're already clearing. */
-    self->in_cleanup = 1;
+    self->in_wait_cleanup = 1;
 
     while (!ngx_queue_empty(&self->wait_queue)) {
         q = ngx_queue_head(&self->wait_queue);
@@ -326,11 +362,12 @@ static void clear_wait_queue_sv(EV__Hiredis self, SV* error_sv) {
         free_wait_entry(wt);
     }
 
-    self->in_cleanup = was_in_cleanup;
+    self->in_wait_cleanup = 0;
 }
 
 /* Forward declarations */
 static void pre_connect_common(EV__Hiredis self, redisOptions* opts);
+static int  post_connect_setup(EV__Hiredis self, const char* err_prefix);
 static void do_reconnect(EV__Hiredis self);
 static void send_next_waiting(EV__Hiredis self);
 static void schedule_waiting_timer(EV__Hiredis self);
@@ -359,8 +396,7 @@ static void reconnect_timer_cb(EV_P_ ev_timer* w, int revents) {
     (void)loop;
     (void)revents;
 
-    /* Safety check: if self is NULL or already freed, skip */
-    if (self == NULL || self->magic != EV_HIREDIS_MAGIC) return;
+    if (NULL == self || self->magic != EV_HIREDIS_MAGIC) return;
 
     self->reconnect_timer_active = 0;
     self->callback_depth++;
@@ -373,7 +409,9 @@ static void schedule_reconnect(EV__Hiredis self) {
     ev_tstamp delay;
 
     if (!self->reconnect) return;
+    if (self->intentional_disconnect) return;
     if (NULL == self->loop) return;
+    stop_reconnect_timer(self);
     if (self->max_reconnect_attempts > 0 &&
         self->reconnect_attempts >= self->max_reconnect_attempts) {
         /* Clear waiting queue that was preserved for reconnect - reconnect has
@@ -394,16 +432,14 @@ static void schedule_reconnect(EV__Hiredis self) {
 }
 
 /* Expire waiting commands that have exceeded waiting_timeout.
- * Uses in_cleanup flag to prevent re-entrant queue modification from
- * user callbacks (e.g., if callback calls skip_waiting). */
+ * Uses head-refetch iteration pattern which is safe against re-entrant
+ * queue modification (e.g., if a callback calls skip_waiting). */
 static void expire_waiting_commands(EV__Hiredis self) {
     ngx_queue_t* q;
     ev_hiredis_wait_t* wt;
     ev_tstamp now;
     ev_tstamp timeout;
-    int was_in_cleanup = self->in_cleanup;
 
-    self->in_cleanup = 1;
     now = ev_now(self->loop);
     /* Capture timeout at start - callbacks may modify self->waiting_timeout_ms
      * and we need consistent behavior for the entire batch. */
@@ -431,8 +467,6 @@ static void expire_waiting_commands(EV__Hiredis self) {
             break;
         }
     }
-
-    self->in_cleanup = was_in_cleanup;
 }
 
 static void waiting_timer_cb(EV_P_ ev_timer* w, int revents) {
@@ -441,8 +475,7 @@ static void waiting_timer_cb(EV_P_ ev_timer* w, int revents) {
     (void)loop;
     (void)revents;
 
-    /* Safety check: if self is NULL or already freed, skip */
-    if (self == NULL || self->magic != EV_HIREDIS_MAGIC) return;
+    if (NULL == self || self->magic != EV_HIREDIS_MAGIC) return;
 
     self->waiting_timer_active = 0;
     self->callback_depth++;
@@ -492,6 +525,7 @@ static void do_reconnect(EV__Hiredis self) {
         return;
     }
 
+    self->intentional_disconnect = 0;
     pre_connect_common(self, &opts);
 
     if (NULL != self->path) {
@@ -512,50 +546,7 @@ static void do_reconnect(EV__Hiredis self) {
         return;
     }
 
-    self->ac_saved = NULL;
-    self->ac->data = (void*)self;
-
-#ifdef EV_HIREDIS_SSL
-    if (NULL != self->ssl_ctx) {
-        if (REDIS_OK != redisInitiateSSLWithContext(&self->ac->c, self->ssl_ctx)) {
-            emit_error_str(self, "reconnect error: SSL initiation failed");
-            redisAsyncFree(self->ac);
-            self->ac = NULL;
-            schedule_reconnect(self);
-            return;
-        }
-    }
-#endif
-
-    if (self->keepalive > 0) {
-        redisEnableKeepAliveWithInterval(&self->ac->c, self->keepalive);
-    }
-    if (self->tcp_user_timeout > 0) {
-        redisSetTcpUserTimeout(&self->ac->c, self->tcp_user_timeout);
-    }
-
-    if (REDIS_OK != redisLibevAttach(self->loop, self->ac)) {
-        redisAsyncFree(self->ac);
-        self->ac = NULL;
-        emit_error_str(self, "reconnect error: cannot attach libev");
-        schedule_reconnect(self);
-        return;
-    }
-
-    if (self->priority != 0) {
-        redisLibevSetPriority(self->ac, self->priority);
-    }
-
-    redisAsyncSetConnectCallbackNC(self->ac, EV__hiredis_connect_cb);
-    redisAsyncSetDisconnectCallback(self->ac, (redisDisconnectCallback*)EV__hiredis_disconnect_cb);
-    if (NULL != self->push_handler) {
-        redisAsyncSetPushCallback(self->ac, EV__hiredis_push_cb);
-    }
-
-    if (self->ac->err) {
-        emit_error_str(self, self->ac->errstr);
-        redisAsyncFree(self->ac);
-        self->ac = NULL;
+    if (REDIS_OK != post_connect_setup(self, "reconnect error")) {
         schedule_reconnect(self);
         return;
     }
@@ -618,10 +609,21 @@ static void EV__hiredis_disconnect_cb(redisAsyncContext* c, int status) {
     SV* error_sv;
     int should_reconnect = 0;
     int was_intentional;
+    int will_reconnect;
 
     /* Safety check: if self is NULL or already freed, skip callback */
     if (self == NULL) return;
     if (self->magic != EV_HIREDIS_MAGIC) return;
+
+    /* Stale disconnect callback: user already established a new connection
+     * (e.g., called disconnect() then connect() before the old deferred
+     * disconnect fired). Old pending callbacks were already processed by
+     * reply_cb. Skip all cleanup to avoid clobbering the new connection.
+     * Clear ac_saved if it points to this old context to prevent dangling. */
+    if (self->ac != NULL && self->ac != c) {
+        if (self->ac_saved == c) self->ac_saved = NULL;
+        return;
+    }
 
     was_intentional = self->intentional_disconnect;
     self->intentional_disconnect = 0;
@@ -661,17 +663,15 @@ static void EV__hiredis_disconnect_cb(redisAsyncContext* c, int status) {
 
     remove_cb_queue_sv(self, error_sv);
 
-    /* Clear waiting queue if:
-     * - resume_waiting_on_reconnect is disabled, OR
-     * - this was an intentional disconnect (no reconnect will happen)
-     * When was_intentional is true, we won't reconnect, so waiting commands
-     * must be cancelled. */
-    if (!self->resume_waiting_on_reconnect || was_intentional) {
+    /* Clear waiting queue unless we will actually reconnect and
+     * resume_waiting_on_reconnect is enabled. */
+    will_reconnect = should_reconnect && !self->intentional_disconnect && self->reconnect;
+    if (!self->resume_waiting_on_reconnect || was_intentional || !will_reconnect) {
         clear_wait_queue_sv(self, error_sv);
         stop_waiting_timer(self);
     }
 
-    if (should_reconnect) {
+    if (will_reconnect) {
         schedule_reconnect(self);
     }
 
@@ -732,26 +732,26 @@ static void pre_connect_common(EV__Hiredis self, redisOptions* opts) {
     if (self->reuseaddr) {
         opts->options |= REDIS_OPT_REUSEADDR;
     }
-    if (NULL != self->source_addr) {
+    if (NULL != self->source_addr && NULL == self->path) {
         opts->endpoint.tcp.source_addr = self->source_addr;
     }
 }
 
-static void connect_common(EV__Hiredis self) {
-    int r;
-
+/* Set up a newly allocated redisAsyncContext: SSL, keepalive, libev, callbacks.
+ * On failure: frees ac, nulls self->ac, emits error with err_prefix. */
+static int post_connect_setup(EV__Hiredis self, const char* err_prefix) {
     self->ac_saved = NULL;
     self->ac->data = (void*)self;
 
 #ifdef EV_HIREDIS_SSL
     if (NULL != self->ssl_ctx) {
         if (REDIS_OK != redisInitiateSSLWithContext(&self->ac->c, self->ssl_ctx)) {
-            SV* sv_error = sv_2mortal(newSVpvf("connect error: SSL initiation failed: %s",
-                self->ac->errstr[0] ? self->ac->errstr : "unknown error"));
+            SV* err = sv_2mortal(newSVpvf("%s: SSL initiation failed: %s",
+                err_prefix, self->ac->errstr[0] ? self->ac->errstr : "unknown error"));
             redisAsyncFree(self->ac);
             self->ac = NULL;
-            emit_error(self, sv_error);
-            return;
+            emit_error(self, err);
+            return REDIS_ERR;
         }
     }
 #endif
@@ -763,12 +763,12 @@ static void connect_common(EV__Hiredis self) {
         redisSetTcpUserTimeout(&self->ac->c, self->tcp_user_timeout);
     }
 
-    r = redisLibevAttach(self->loop, self->ac);
-    if (REDIS_OK != r) {
+    if (REDIS_OK != redisLibevAttach(self->loop, self->ac)) {
+        SV* err = sv_2mortal(newSVpvf("%s: cannot attach libev", err_prefix));
         redisAsyncFree(self->ac);
         self->ac = NULL;
-        emit_error_str(self, "connect error: cannot attach libev");
-        return;
+        emit_error(self, err);
+        return REDIS_ERR;
     }
 
     if (self->priority != 0) {
@@ -782,16 +782,18 @@ static void connect_common(EV__Hiredis self) {
     }
 
     if (self->ac->err) {
-        SV* sv_error = sv_2mortal(newSVpvf("connect error: %s", self->ac->errstr));
+        SV* err = sv_2mortal(newSVpvf("%s: %s", err_prefix, self->ac->errstr));
         redisAsyncFree(self->ac);
         self->ac = NULL;
-        emit_error(self, sv_error);
-        return;
+        emit_error(self, err);
+        return REDIS_ERR;
     }
+
+    return REDIS_OK;
 }
 
 static SV* EV__hiredis_decode_reply(redisReply* reply) {
-    SV* res = NULL;
+    SV* res;
 
     switch (reply->type) {
         case REDIS_REPLY_STRING:
@@ -828,7 +830,7 @@ static SV* EV__hiredis_decode_reply(redisReply* reply) {
             if (reply->elements > 0) {
                 av_extend(av, (SSize_t)(reply->elements - 1));
                 for (i = 0; i < reply->elements; i++) {
-                    if (reply->element[i] != NULL) {
+                    if (NULL != reply->element[i]) {
                         av_push(av, EV__hiredis_decode_reply(reply->element[i]));
                     }
                     else {
@@ -858,43 +860,72 @@ static void EV__hiredis_reply_cb(redisAsyncContext* c, void* reply, void* privda
     cbt = (ev_hiredis_cb_t*)privdata;
 
     if (cbt->skipped) {
-        Safefree(cbt);
+        if (!cbt->persist || NULL == reply) {
+            /* Multi-channel persistent: hiredis fires once per channel with
+             * same cbt. Decrement sub_count, free only on last call. */
+            if (cbt->persist && NULL == reply && cbt->sub_count > 1) {
+                cbt->sub_count--;
+                return;
+            }
+            Safefree(cbt);
+        }
         return;
     }
 
-    /* Safety check: if self is NULL or memory is corrupted, skip callback */
+    /* self is NULL when DESTROY nulled ac->data (deferred free inside
+     * REDIS_IN_CALLBACK) or during PL_dirty. Still invoke the callback
+     * with a disconnect error so users can clean up resources. The hiredis
+     * context (c) is still alive here — safe to read c->errstr.
+     * cb may be NULL during PL_dirty where we pre-null it.
+     * For persistent commands (multi-channel subscribe), hiredis fires
+     * reply_cb once per channel with the same cbt. Invoke the callback
+     * only once (null cb after), use sub_count to track when to free. */
     if (self == NULL) {
-        /* Cannot access queue - just free the callback struct.
-         * Always decrement refcount regardless of persist flag since
-         * the callback will never be invoked again. */
-        SvREFCNT_dec(cbt->cb);
+        if (NULL != cbt->cb) {
+            invoke_callback_error(cbt->cb,
+                sv_2mortal(newSVpv(c->errstr[0] ? c->errstr : "disconnected", 0)));
+            SvREFCNT_dec(cbt->cb);
+            cbt->cb = NULL;
+        }
+        if (cbt->persist && reply == NULL && cbt->sub_count > 1) {
+            cbt->sub_count--;
+            return;
+        }
         Safefree(cbt);
         return;
     }
 
     /* If self is marked as freed (during DESTROY), we still invoke the
-     * callback with an error, but skip any self->field access afterward. */
+     * callback with an error, but skip any self->field access afterward.
+     * For persistent commands, don't free cbt here — leave it in the queue
+     * for remove_cb_queue_sv to clean up after redisAsyncFree returns. */
     if (self->magic == EV_HIREDIS_FREED) {
-        ngx_queue_remove(&cbt->queue);
-        /* Call user callback with error */
-        invoke_callback_error(cbt->cb, sv_2mortal(newSVpv(c->errstr[0] ? c->errstr : "disconnected", 0)));
-        /* Always decrement refcount during destruction - even persistent callbacks
-         * won't be called again after the object is freed. */
-        SvREFCNT_dec(cbt->cb);
-        Safefree(cbt);
+        if (NULL != cbt->cb) {
+            self->callback_depth++;
+            invoke_callback_error(cbt->cb, sv_2mortal(newSVpv(c->errstr[0] ? c->errstr : "disconnected", 0)));
+            self->callback_depth--;
+            SvREFCNT_dec(cbt->cb);
+            cbt->cb = NULL;
+        }
+        if (!cbt->persist) {
+            ngx_queue_remove(&cbt->queue);
+            Safefree(cbt);
+        }
+        check_destroyed(self);
         return;
     }
 
     /* Unknown magic - memory corruption, skip.
+     * Don't touch queue pointers (self's memory may be garbage).
      * Always decrement refcount since callback will never be invoked again. */
     if (self->magic != EV_HIREDIS_MAGIC) {
-        ngx_queue_remove(&cbt->queue);
         SvREFCNT_dec(cbt->cb);
         Safefree(cbt);
         return;
     }
 
     self->current_cb = cbt;
+    self->callback_depth++;
 
     if (NULL == reply) {
         sv_err = sv_2mortal(newSVpv(c->errstr, 0));
@@ -907,6 +938,7 @@ static void EV__hiredis_reply_cb(redisAsyncContext* c, void* reply, void* privda
         SAVETMPS;
 
         PUSHMARK(SP);
+        EXTEND(SP, 2);
         sv_reply = sv_2mortal(EV__hiredis_decode_reply((redisReply*)reply));
         if (((redisReply*)reply)->type == REDIS_REPLY_ERROR) {
             PUSHs(&PL_sv_undef);
@@ -926,19 +958,25 @@ static void EV__hiredis_reply_cb(redisAsyncContext* c, void* reply, void* privda
         LEAVE;
     }
 
+    self->callback_depth--;
     self->current_cb = NULL;
 
     /* If DESTROY was called during our callback (e.g., user undef'd $redis),
      * self->magic is EV_HIREDIS_FREED but self is still valid (DESTROY defers
-     * Safefree when current_cb is set). Complete cleanup here. */
+     * Safefree when callback_depth > 0). Complete cleanup here.
+     * For persistent commands (multi-channel subscribe), hiredis will fire
+     * reply_cb again for remaining channels via __redisAsyncFree. Null the
+     * callback to prevent double invocation, but leave cbt alive so those
+     * later calls see it and can track sub_count for proper cleanup. */
     if (self->magic == EV_HIREDIS_FREED) {
-        if (cbt->cb) SvREFCNT_dec(cbt->cb);
-        Safefree(cbt);
-        if (self->ac_saved != NULL) {
-            self->ac_saved->data = NULL;
-            self->ac_saved = NULL;
+        if (NULL != cbt->cb) {
+            SvREFCNT_dec(cbt->cb);
+            cbt->cb = NULL;
         }
-        Safefree(self);
+        if (!cbt->persist) {
+            Safefree(cbt);
+        }
+        check_destroyed(self);
         return;
     }
 
@@ -958,6 +996,24 @@ static void EV__hiredis_reply_cb(redisAsyncContext* c, void* reply, void* privda
         return;
     }
 
+    /* Detect end of persistent subscription: when all channels from a
+     * SUBSCRIBE command have been unsubscribed, hiredis removes its internal
+     * callback entry. Clean up our cbt to prevent orphaned queue entries. */
+    if (cbt->persist && reply != NULL && is_unsub_reply((redisReply*)reply)) {
+        cbt->sub_count--;
+        if (cbt->sub_count <= 0) {
+            /* All channels unsubscribed — persistent commands are not counted
+             * in pending_count, so don't decrement it. */
+            ngx_queue_remove(&cbt->queue);
+            self->callback_depth++;
+            SvREFCNT_dec(cbt->cb);
+            Safefree(cbt);
+            self->callback_depth--;
+            check_destroyed(self);
+            return;
+        }
+    }
+
     if (0 == cbt->persist) {
         /* Remove from queue BEFORE SvREFCNT_dec. The SvREFCNT_dec may free a
          * closure that holds the last reference to this object, triggering
@@ -969,10 +1025,38 @@ static void EV__hiredis_reply_cb(redisAsyncContext* c, void* reply, void* privda
         self->callback_depth++;
         SvREFCNT_dec(cbt->cb);
         Safefree(cbt);
-        send_next_waiting(self);
+        /* Don't drain waiting queue when reply is NULL (connection dying) —
+         * disconnect_cb will handle reconnect and wait queue preservation. */
+        if (reply != NULL) {
+            send_next_waiting(self);
+        }
         self->callback_depth--;
         check_destroyed(self);
     }
+}
+
+/* Submit a cbt (already in cb_queue) to Redis. On failure, removes cbt from
+ * queue, invokes error callback, and frees cbt. Returns REDIS_OK or REDIS_ERR. */
+static int submit_to_redis(EV__Hiredis self, ev_hiredis_cb_t* cbt,
+                           int argc, const char** argv, const size_t* argvlen)
+{
+    int r = redisAsyncCommandArgv(
+        self->ac, EV__hiredis_reply_cb, (void*)cbt,
+        argc, argv, argvlen
+    );
+
+    if (REDIS_OK != r) {
+        ngx_queue_remove(&cbt->queue);
+        if (!cbt->persist) self->pending_count--;
+
+        invoke_callback_error(cbt->cb, sv_2mortal(newSVpv(
+            (self->ac && self->ac->errstr[0]) ? self->ac->errstr : "command failed", 0)));
+
+        SvREFCNT_dec(cbt->cb);
+        Safefree(cbt);
+    }
+
+    return r;
 }
 
 /* Send waiting commands to Redis. Uses iterative loop instead of recursion
@@ -999,32 +1083,16 @@ static void send_next_waiting(EV__Hiredis self) {
         wt->cb = NULL;
         cbt->skipped = 0;
         cbt->persist = wt->persist;
+        cbt->sub_count = wt->persist ? wt->argc - 1 : 0;
         ngx_queue_init(&cbt->queue);
         ngx_queue_insert_tail(&self->cb_queue, &cbt->queue);
-        self->pending_count++;
+        if (!cbt->persist) self->pending_count++;
 
-        r = redisAsyncCommandArgv(
-            self->ac, EV__hiredis_reply_cb, (void*)cbt,
-            wt->argc, (const char**)wt->argv, wt->argvlen
-        );
-
-        if (REDIS_OK != r) {
-            ngx_queue_remove(&cbt->queue);
-            self->pending_count--;
-
-            invoke_callback_error(cbt->cb, sv_2mortal(newSVpv(
-                (self->ac && self->ac->errstr[0]) ? self->ac->errstr : "command failed", 0)));
-
-            SvREFCNT_dec(cbt->cb);
-            Safefree(cbt);
-            free_wait_entry(wt);
-            /* Continue loop to try next waiting command */
-            continue;
-        }
-
+        r = submit_to_redis(self, cbt, wt->argc,
+            (const char**)wt->argv, wt->argvlen);
         free_wait_entry(wt);
-        /* Success - command sent, exit loop */
-        return;
+
+        if (REDIS_OK == r) return;
     }
 }
 
@@ -1101,6 +1169,18 @@ CODE:
      * data pointers, causing SEGV during process cleanup. */
     if (PL_dirty) {
         if (NULL != self->ac) {
+            /* Null cb_queue callbacks before redisAsyncFree to prevent
+             * SvREFCNT_dec on potentially-freed SVs during global destruction.
+             * (Same pattern as wait_queue below.) */
+            {
+                ngx_queue_t* q;
+                for (q = ngx_queue_head(&self->cb_queue);
+                     q != ngx_queue_sentinel(&self->cb_queue);
+                     q = ngx_queue_next(q)) {
+                    ev_hiredis_cb_t* cbt = ngx_queue_data(q, ev_hiredis_cb_t, queue);
+                    cbt->cb = NULL;
+                }
+            }
             self->ac->data = NULL;  /* prevent callbacks from accessing self */
             redisAsyncFree(self->ac);
             self->ac = NULL;
@@ -1109,17 +1189,15 @@ CODE:
             self->ac_saved->data = NULL;
             self->ac_saved = NULL;
         }
-        if (NULL != self->host) Safefree(self->host);
-        if (NULL != self->path) Safefree(self->path);
-        if (NULL != self->source_addr) Safefree(self->source_addr);
-        if (NULL != self->connect_timeout) Safefree(self->connect_timeout);
-        if (NULL != self->command_timeout) Safefree(self->command_timeout);
-#ifdef EV_HIREDIS_SSL
-        if (NULL != self->ssl_ctx) {
-            redisFreeSSLContext(self->ssl_ctx);
-            self->ssl_ctx = NULL;
+        free_c_fields(self);
+        /* Free wait_queue C memory (skip Perl callbacks during global destruction) */
+        while (!ngx_queue_empty(&self->wait_queue)) {
+            ngx_queue_t* q = ngx_queue_head(&self->wait_queue);
+            ev_hiredis_wait_t* wt = ngx_queue_data(q, ev_hiredis_wait_t, queue);
+            ngx_queue_remove(q);
+            wt->cb = NULL;  /* skip SvREFCNT_dec during PL_dirty */
+            free_wait_entry(wt);
         }
-#endif
         Safefree(self);
         return;
     }
@@ -1143,7 +1221,11 @@ CODE:
             ac_to_free->data = NULL;
             skip_cb_cleanup = 1;
         }
+
+        /* Protect against premature free in disconnect_cb if triggered synchronously */
+        self->callback_depth++;
         redisAsyncFree(ac_to_free);
+        self->callback_depth--;
     }
     /* If disconnect() was called from inside a callback, ac_saved points to
      * the deferred async context. NULL its data pointer to prevent the
@@ -1153,67 +1235,24 @@ CODE:
         self->ac_saved = NULL;
         skip_cb_cleanup = 1;
     }
-    if (NULL != self->error_handler) {
-        SvREFCNT_dec(self->error_handler);
-        self->error_handler = NULL;
-    }
-    if (NULL != self->connect_handler) {
-        SvREFCNT_dec(self->connect_handler);
-        self->connect_handler = NULL;
-    }
-    if (NULL != self->disconnect_handler) {
-        SvREFCNT_dec(self->disconnect_handler);
-        self->disconnect_handler = NULL;
-    }
-    if (NULL != self->push_handler) {
-        SvREFCNT_dec(self->push_handler);
-        self->push_handler = NULL;
-    }
-    if (NULL != self->connect_timeout) {
-        Safefree(self->connect_timeout);
-        self->connect_timeout = NULL;
-    }
-    if (NULL != self->command_timeout) {
-        Safefree(self->command_timeout);
-        self->command_timeout = NULL;
-    }
-    if (NULL != self->host) {
-        Safefree(self->host);
-        self->host = NULL;
-    }
-    if (NULL != self->path) {
-        Safefree(self->path);
-        self->path = NULL;
-    }
-    if (NULL != self->source_addr) {
-        Safefree(self->source_addr);
-        self->source_addr = NULL;
-    }
-#ifdef EV_HIREDIS_SSL
-    if (NULL != self->ssl_ctx) {
-        redisFreeSSLContext(self->ssl_ctx);
-        self->ssl_ctx = NULL;
-    }
-#endif
+    CLEAR_HANDLER(self->error_handler);
+    CLEAR_HANDLER(self->connect_handler);
+    CLEAR_HANDLER(self->disconnect_handler);
+    CLEAR_HANDLER(self->push_handler);
+    free_c_fields(self);
 
-    clear_wait_queue_sv(self, err_disconnected);
-    if (!skip_cb_cleanup) {
+    if (!self->in_wait_cleanup) {
+        clear_wait_queue_sv(self, err_disconnected);
+    }
+    if (!skip_cb_cleanup && !self->in_cb_cleanup) {
         /* Safe to free cbts ourselves — hiredis has no deferred references. */
         remove_cb_queue_sv(self, NULL);
     }
     /* else: hiredis still holds references to our cbts (deferred free/disconnect).
      * reply_cb will handle cbt cleanup when called with self == NULL. */
 
-    if (self->current_cb != NULL || self->callback_depth > 0) {
-        /* Inside a C-level callback that invokes Perl code.
-         * Defer Safefree — the callback will call check_destroyed()
-         * after decrementing callback_depth to complete cleanup. */
-    }
-    else {
-        if (self->ac_saved != NULL) {
-            self->ac_saved->data = NULL;
-            self->ac_saved = NULL;
-        }
+    /* Defer Safefree if inside a callback — check_destroyed() handles it */
+    if (self->current_cb == NULL && self->callback_depth == 0) {
         Safefree(self);
     }
 }
@@ -1222,17 +1261,16 @@ void
 connect(EV::Hiredis self, char* hostname, int port = 6379);
 CODE:
 {
-    size_t len;
     redisOptions opts;
 
     if (NULL != self->ac) {
         croak("already connected");
     }
 
+    self->intentional_disconnect = 0;
+    self->reconnect_attempts = 0;
     clear_connection_params(self);
-    len = strlen(hostname);
-    Newx(self->host, len + 1, char);
-    Copy(hostname, self->host, len + 1, char);
+    self->host = savepv(hostname);
     self->port = port;
 
     memset(&opts, 0, sizeof(opts));
@@ -1243,24 +1281,23 @@ CODE:
         croak("cannot allocate memory");
     }
 
-    connect_common(self);
+    (void)post_connect_setup(self, "connect error");
 }
 
 void
 connect_unix(EV::Hiredis self, const char* path);
 CODE:
 {
-    size_t len;
     redisOptions opts;
 
     if (NULL != self->ac) {
         croak("already connected");
     }
 
+    self->intentional_disconnect = 0;
+    self->reconnect_attempts = 0;
     clear_connection_params(self);
-    len = strlen(path);
-    Newx(self->path, len + 1, char);
-    Copy(path, self->path, len + 1, char);
+    self->path = savepv(path);
 
     memset(&opts, 0, sizeof(opts));
     pre_connect_common(self, &opts);
@@ -1270,30 +1307,40 @@ CODE:
         croak("cannot allocate memory");
     }
 
-    connect_common(self);
+    (void)post_connect_setup(self, "connect error");
 }
 
 void
 disconnect(EV::Hiredis self);
 CODE:
 {
-    if (NULL == self->ac) {
-        return;  /* Already disconnected - no-op */
-    }
-
+    /* Stop any pending reconnect timer on explicit disconnect */
     self->intentional_disconnect = 1;
-    /* Only save ac pointer for deferred disconnect. When REDIS_IN_CALLBACK is
-     * set, redisAsyncDisconnect defers the actual free — we need ac_saved so
-     * DESTROY can NULL ac->data to prevent use-after-free if the object is
-     * destroyed before the deferred disconnect callback runs.
-     *
-     * When NOT in a callback, redisAsyncDisconnect fires synchronously:
-     * disconnect_cb runs and handles all cleanup. Setting ac_saved in that
-     * case is dangerous — if DESTROY fires during the synchronous reply
-     * callback processing (e.g., SvREFCNT_dec of a closure drops the last
-     * reference), DESTROY NULLs ac->data, causing disconnect_cb to return
-     * early without clearing ac_saved. The ac is then freed, leaving
-     * ac_saved as a dangling pointer. */
+    stop_reconnect_timer(self);
+    self->reconnect_attempts = 0;
+
+    if (NULL == self->ac) {
+        /* Already disconnected — still stop waiting timer and clear
+         * wait queue (e.g., resume_waiting_on_reconnect kept them alive
+         * after a connection drop, but user now explicitly disconnects). */
+        stop_waiting_timer(self);
+        if (!ngx_queue_empty(&self->wait_queue)) {
+            self->callback_depth++;
+            clear_wait_queue_sv(self, err_disconnected);
+            self->callback_depth--;
+            check_destroyed(self);
+        }
+        return;
+    }
+    /* Save ac pointer for deferred disconnect: when inside a hiredis
+     * callback, redisAsyncDisconnect only sets REDIS_DISCONNECTING and
+     * returns. DESTROY needs ac_saved to NULL ac->data if the Perl object
+     * is freed before the deferred disconnect completes.
+     * Only set when REDIS_IN_CALLBACK: in the synchronous path,
+     * disconnect_cb fires during redisAsyncDisconnect and clears ac_saved;
+     * but if DESTROY fires nested during that processing (SvREFCNT_dec
+     * dropping last ref), it would NULL ac->data, causing disconnect_cb to
+     * skip cleanup, leaving ac_saved dangling after ac is freed. */
     if (self->ac->c.flags & REDIS_IN_CALLBACK) {
         self->ac_saved = self->ac;
     }
@@ -1364,8 +1411,8 @@ on_push(EV::Hiredis self, SV* handler = NULL);
 CODE:
 {
     RETVAL = handler_accessor(&self->push_handler, handler, items > 1);
-    /* Register/unregister push callback with hiredis if connected */
-    if (items > 1 && NULL != self->ac) {
+    /* Sync push callback with hiredis if connected */
+    if (NULL != self->ac) {
         if (NULL != self->push_handler) {
             redisAsyncSetPushCallback(self->ac, EV__hiredis_push_cb);
         } else {
@@ -1399,7 +1446,10 @@ CODE:
     }
 
     if (NULL == self->ac) {
-        croak("connection required before calling command");
+        if (!(self->reconnect && self->reconnect_timer_active)) {
+            croak("connection required before calling command");
+        }
+        /* Reconnect in progress — fall through to queue in wait_queue */
     }
 
     argc = items - 2;
@@ -1413,7 +1463,8 @@ CODE:
 
     persist = is_persistent_command(argv[0]);
 
-    if (self->max_pending > 0 && self->pending_count >= self->max_pending) {
+    if (NULL == self->ac ||
+        (self->max_pending > 0 && self->pending_count >= self->max_pending)) {
         Newx(wt, 1, ev_hiredis_wait_t);
         Newx(wt->argv, argc, char*);
         Newx(wt->argvlen, argc, size_t);
@@ -1433,38 +1484,23 @@ CODE:
         self->waiting_count++;
         schedule_waiting_timer(self);
         RETVAL = REDIS_OK;
-
-        Safefree(argv);
-        Safefree(argvlen);
     }
     else {
         Newx(cbt, 1, ev_hiredis_cb_t);
         cbt->cb = SvREFCNT_inc(cb);
         cbt->skipped = 0;
         cbt->persist = persist;
+        cbt->sub_count = persist ? argc - 1 : 0;
         ngx_queue_init(&cbt->queue);
         ngx_queue_insert_tail(&self->cb_queue, &cbt->queue);
-        self->pending_count++;
+        if (!persist) self->pending_count++;
 
-        RETVAL = redisAsyncCommandArgv(
-            self->ac, EV__hiredis_reply_cb, (void*)cbt,
-            argc, (const char**)argv, argvlen
-        );
-
-        if (REDIS_OK != RETVAL) {
-            ngx_queue_remove(&cbt->queue);
-            self->pending_count--;
-
-            invoke_callback_error(cbt->cb, sv_2mortal(newSVpv(
-                (self->ac && self->ac->errstr[0]) ? self->ac->errstr : "command failed", 0)));
-
-            SvREFCNT_dec(cbt->cb);
-            Safefree(cbt);
-        }
-
-        Safefree(argv);
-        Safefree(argvlen);
+        RETVAL = submit_to_redis(self, cbt,
+            argc, (const char**)argv, argvlen);
     }
+
+    Safefree(argv);
+    Safefree(argvlen);
 }
 OUTPUT:
     RETVAL
@@ -1480,8 +1516,9 @@ CODE:
         croak("reconnect_delay too large (max %d ms)", MAX_TIMEOUT_MS);
     }
     self->reconnect = enable ? 1 : 0;
-    self->reconnect_delay_ms = delay_ms > 0 ? delay_ms : 1000;
+    self->reconnect_delay_ms = delay_ms;
     self->max_reconnect_attempts = max_attempts >= 0 ? max_attempts : 0;
+    self->reconnect_attempts = 0;
 
     if (!enable) {
         stop_reconnect_timer(self);
@@ -1558,12 +1595,7 @@ CODE:
         schedule_waiting_timer(self);
     }
 
-    if (self->waiting_timeout_ms > 0) {
-        RETVAL = newSViv((IV)self->waiting_timeout_ms);
-    }
-    else {
-        RETVAL = &PL_sv_undef;
-    }
+    RETVAL = newSViv((IV)self->waiting_timeout_ms);
 }
 OUTPUT:
     RETVAL
@@ -1621,7 +1653,7 @@ prefer_ipv4(EV::Hiredis self, SV* value = NULL);
 CODE:
 {
     if (NULL != value && SvOK(value)) {
-        self->prefer_ipv4 = SvIV(value) ? 1 : 0;
+        self->prefer_ipv4 = SvTRUE(value) ? 1 : 0;
         if (self->prefer_ipv4) self->prefer_ipv6 = 0;
     }
     RETVAL = self->prefer_ipv4;
@@ -1634,7 +1666,7 @@ prefer_ipv6(EV::Hiredis self, SV* value = NULL);
 CODE:
 {
     if (NULL != value && SvOK(value)) {
-        self->prefer_ipv6 = SvIV(value) ? 1 : 0;
+        self->prefer_ipv6 = SvTRUE(value) ? 1 : 0;
         if (self->prefer_ipv6) self->prefer_ipv4 = 0;
     }
     RETVAL = self->prefer_ipv6;
@@ -1652,10 +1684,7 @@ CODE:
             self->source_addr = NULL;
         }
         if (NULL != value && SvOK(value)) {
-            STRLEN len;
-            const char* addr = SvPV(value, len);
-            Newx(self->source_addr, len + 1, char);
-            Copy(addr, self->source_addr, len + 1, char);
+            self->source_addr = savepv(SvPV_nolen(value));
         }
     }
     if (NULL != self->source_addr) {
@@ -1691,7 +1720,7 @@ cloexec(EV::Hiredis self, SV* value = NULL);
 CODE:
 {
     if (NULL != value && SvOK(value)) {
-        self->cloexec = SvIV(value) ? 1 : 0;
+        self->cloexec = SvTRUE(value) ? 1 : 0;
     }
     RETVAL = self->cloexec;
 }
@@ -1703,7 +1732,7 @@ reuseaddr(EV::Hiredis self, SV* value = NULL);
 CODE:
 {
     if (NULL != value && SvOK(value)) {
-        self->reuseaddr = SvIV(value) ? 1 : 0;
+        self->reuseaddr = SvTRUE(value) ? 1 : 0;
     }
     RETVAL = self->reuseaddr;
 }
@@ -1714,13 +1743,22 @@ void
 skip_waiting(EV::Hiredis self);
 CODE:
 {
+    /* Protect self from destruction during queue iteration */
+    self->callback_depth++;
+
     /* If cleanup is already in progress (e.g., during expire_waiting_commands
      * or disconnect callback), don't modify the wait_queue. */
-    if (self->in_cleanup) {
+    if (self->in_wait_cleanup) {
+        self->callback_depth--;
+        check_destroyed(self);
         return;
     }
+
     clear_wait_queue_sv(self, err_skipped);
     stop_waiting_timer(self);
+
+    self->callback_depth--;
+    check_destroyed(self);
 }
 
 void
@@ -1728,62 +1766,60 @@ skip_pending(EV::Hiredis self);
 CODE:
 {
     ngx_queue_t* q;
-    ngx_queue_t* next;
     ev_hiredis_cb_t* cbt;
 
-    /* If cleanup is already in progress (e.g., during disconnect callback),
-     * don't modify the cb_queue - it's already being processed with error
-     * callbacks. The waiting queue is safe to clear regardless. */
-    if (self->in_cleanup) {
-        clear_wait_queue_sv(self, err_skipped);
-        stop_waiting_timer(self);
-        return;
-    }
+    /* Protect self from destruction during queue iteration */
+    self->callback_depth++;
 
+    /* Always attempt to clear waiting queue (handles its own re-entrancy) */
     clear_wait_queue_sv(self, err_skipped);
     stop_waiting_timer(self);
 
-    /* Protect cb_queue iteration from re-entrancy. If a user callback
-     * calls skip_pending() again, the in_cleanup check above will return.
-     * Use save/restore pattern consistent with other cleanup functions. */
-    {
-    int was_in_cleanup = self->in_cleanup;
-    self->in_cleanup = 1;
+    /* If cb_queue cleanup is already in progress, stop here. */
+    if (self->in_cb_cleanup) {
+        self->callback_depth--;
+        check_destroyed(self);
+        return;
+    }
 
-    for (q = ngx_queue_head(&self->cb_queue);
-         q != ngx_queue_sentinel(&self->cb_queue);
-         q = next) {
-        next = ngx_queue_next(q);
+    /* Protect cb_queue iteration from re-entrancy. If a user callback
+     * calls skip_pending() again, the in_cb_cleanup check above will return. */
+    self->in_cb_cleanup = 1;
+
+    /* Use while loop with re-fetch of head each iteration.
+     * This is safe against nested EV::run inside callbacks — if a hiredis
+     * reply_cb fires during the nested run and frees a queue entry, we
+     * re-fetch the head and see the updated queue state. */
+    while (!ngx_queue_empty(&self->cb_queue)) {
+        if (self->magic == EV_HIREDIS_FREED) {
+            break;
+        }
+
+        q = ngx_queue_head(&self->cb_queue);
         cbt = ngx_queue_data(q, ev_hiredis_cb_t, queue);
 
         if (cbt == self->current_cb) {
-            /* Don't skip the currently executing callback - it will complete
-             * normally. User code can check error in the callback if needed. */
-            continue;
+            /* current_cb is at head — if it's the only item, we're done */
+            if (ngx_queue_next(q) == ngx_queue_sentinel(&self->cb_queue)) {
+                break;
+            }
+            q = ngx_queue_next(q);
+            cbt = ngx_queue_data(q, ev_hiredis_cb_t, queue);
         }
 
         /* Mark as skipped FIRST to prevent double callback invocation if
-         * invoke_callback_error re-enters the event loop and causes
-         * EV__hiredis_reply_cb to fire before we finish this loop. */
+         * invoke_callback_error re-enters the event loop. */
         cbt->skipped = 1;
 
-        /* Remove from our tracking queue. The hiredis library still has a
-         * reference to cbt and will call EV__hiredis_reply_cb when the
-         * Redis reply arrives (or on disconnect). That callback will see
-         * skipped=1 and free the cbt. */
         ngx_queue_remove(q);
-        /* Re-initialize the queue node to make any subsequent remove safe.
-         * This protects against re-entrant scenarios where a nested callback
-         * overwrites current_cb, allowing skip_pending to process callbacks
-         * that are still on the call stack. When those callbacks return,
-         * they may try to remove themselves again at line 779. */
+        /* Re-initialize queue node so any subsequent remove (from reply_cb's
+         * skipped path on re-entry) is safe. */
         ngx_queue_init(q);
-        self->pending_count--;
+        if (!cbt->persist) self->pending_count--;
 
-        /* Save and clear callback BEFORE invoking. If the user callback
-         * re-enters the event loop and a Redis reply arrives, the reply
-         * handler will see skipped=1 and free cbt. By clearing cbt->cb
-         * first, we avoid use-after-free when we decrement refcount. */
+        /* Save and clear callback BEFORE invoking — if the user callback
+         * re-enters and a Redis reply arrives, reply_cb sees skipped=1
+         * and frees cbt. Clearing cb first avoids use-after-free. */
         {
             SV* cb_to_invoke = cbt->cb;
             cbt->cb = NULL;
@@ -1791,10 +1827,16 @@ CODE:
             invoke_callback_error(cb_to_invoke, err_skipped);
             SvREFCNT_dec(cb_to_invoke);
         }
+
+        if (self->magic == EV_HIREDIS_FREED) {
+            break;
+        }
     }
 
-    self->in_cleanup = was_in_cleanup;
-    }
+    self->in_cb_cleanup = 0;
+
+    self->callback_depth--;
+    check_destroyed(self);
 }
 
 int

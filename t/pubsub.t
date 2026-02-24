@@ -31,7 +31,7 @@ $subscriber->command('subscribe', 'foo', sub {
 
         $publisher->command('publish', 'foo', 'bar', sub {
             my ($r, $e) = @_;
-            ok !$e;
+            ok !defined $e, 'no publish error';
             is $r, 1;
 
             $publisher->disconnect;
@@ -57,7 +57,69 @@ $subscriber->command('subscribe', 'foo', sub {
     }
 });
 
+my $timeout; $timeout = EV::timer 5, 0, sub {
+    undef $timeout;
+    $subscriber->disconnect;
+    $publisher->disconnect;
+    EV::break;
+};
+
 EV::run;
+
+# Test: multi-channel subscribe
+{
+    my $subscriber = EV::Hiredis->new( path => $connect_info{sock} );
+    my $publisher  = EV::Hiredis->new( path => $connect_info{sock} );
+
+    my @received;
+
+    $subscriber->command('subscribe', 'mchan1', 'mchan2', sub {
+        my ($r, $e) = @_;
+
+        if ($e && !defined $r) {
+            return;
+        }
+
+        push @received, $r;
+
+        if ($r->[0] eq 'subscribe' && $r->[2] == 2) {
+            $publisher->publish('mchan1', 'msg1', sub {
+                $publisher->publish('mchan2', 'msg2', sub {
+                    $publisher->disconnect;
+                });
+            });
+        }
+        elsif ($r->[0] eq 'message' && $r->[1] eq 'mchan2') {
+            $subscriber->unsubscribe('mchan1', 'mchan2', sub {});
+        }
+        elsif ($r->[0] eq 'unsubscribe' && $r->[2] == 0) {
+            $subscriber->disconnect;
+        }
+    });
+
+    my $timeout; $timeout = EV::timer 3, 0, sub {
+        undef $timeout;
+        $subscriber->disconnect;
+        $publisher->disconnect;
+        EV::break;
+    };
+
+    EV::run;
+
+    my @subscribe_msgs = grep { $_->[0] eq 'subscribe' } @received;
+    is scalar(@subscribe_msgs), 2, 'multi-subscribe: got 2 subscribe confirmations';
+    is $subscribe_msgs[0][1], 'mchan1', 'multi-subscribe: first is mchan1';
+    is $subscribe_msgs[1][1], 'mchan2', 'multi-subscribe: second is mchan2';
+
+    my @messages = grep { $_->[0] eq 'message' } @received;
+    is scalar(@messages), 2, 'multi-subscribe: got 2 messages';
+    my %msg_map = map { $_->[1] => $_->[2] } @messages;
+    is $msg_map{mchan1}, 'msg1', 'multi-subscribe: mchan1 received msg1';
+    is $msg_map{mchan2}, 'msg2', 'multi-subscribe: mchan2 received msg2';
+
+    my @unsub_msgs = grep { $_->[0] eq 'unsubscribe' } @received;
+    is scalar(@unsub_msgs), 2, 'multi-subscribe: got 2 unsubscribe confirmations';
+}
 
 # Test: psubscribe (pattern subscribe)
 {
@@ -157,7 +219,7 @@ EV::run;
 }
 
 # Test: ssubscribe (sharded pub/sub, Redis 7+)
-# Note: This test may have issues with hiredis 1.1.1 and sharded pubsub
+# Note: spublish may trigger assertion failure in some hiredis versions
 SKIP: {
     # Get Redis version to check if ssubscribe is supported
     my $version_check = EV::Hiredis->new( path => $connect_info{sock} );
@@ -172,15 +234,14 @@ SKIP: {
         $version_done = 1;
     });
 
-    my $t1 = EV::timer 1, 0, sub { $version_done = 1 };
+    my $t1; $t1 = EV::timer 1, 0, sub { undef $t1; $version_done = 1 };
     EV::run until $version_done;
     $version_check->disconnect;
 
     # Sharded pubsub requires Redis 7.0+
     skip 'ssubscribe requires Redis 7+', 5 if $redis_version < 7;
 
-    # Note: hiredis 1.1.1 may have issues with sharded pubsub (spublish assertion failure)
-    # Testing only ssubscribe basic functionality
+    # Testing only ssubscribe basic functionality (spublish may cause assertion failure)
     my $subscriber = EV::Hiredis->new( path => $connect_info{sock} );
 
     my $subscribed = 0;
@@ -214,8 +275,8 @@ SKIP: {
 
     ok $subscribed, 'ssubscribe basic functionality works';
     # Skip the spublish/smessage tests due to hiredis compatibility issues
-    pass 'skipping spublish test due to hiredis 1.1.1 compatibility';
-    pass 'skipping smessage test due to hiredis 1.1.1 compatibility';
+    pass 'skipping spublish test due to hiredis compatibility';
+    pass 'skipping smessage test due to hiredis compatibility';
 }
 
 done_testing;

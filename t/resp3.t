@@ -45,9 +45,7 @@ my $redis_minor = 0;
 
 diag "Redis version: $redis_version.$redis_minor";
 
-SKIP: {
-    skip 'RESP3 tests require Redis 6+', 0 if $redis_version < 6;
-
+{
     # Test: REDIS_REPLY_DOUBLE via HINCRBYFLOAT
     {
         my $r = EV::Hiredis->new(path => $connect_info{sock});
@@ -336,6 +334,59 @@ SKIP: {
     ok scalar(@push_msgs) > 0, 'received PUSH message(s)';
     ok ref($push_msgs[0]) eq 'ARRAY', 'PUSH message is array ref';
     is $push_msgs[0][0], 'invalidate', 'PUSH message type is invalidate';
+}
+
+# Test: exception in on_push handler is caught and warned
+SKIP: {
+    skip 'Requires Redis >= 6.0 for RESP3 push', 2 if $redis_version < 6;
+
+    my $r = EV::Hiredis->new(path => $connect_info{sock});
+    my @warnings;
+    local $SIG{__WARN__} = sub { push @warnings, $_[0] };
+    my $hello_ok = 0;
+
+    $r->on_push(sub {
+        die "intentional exception in push handler";
+    });
+
+    run_with_timeout(3, sub {
+        $r->hello(3, sub {
+            my ($res, $err) = @_;
+            if ($err) {
+                $r->disconnect;
+                EV::break;
+                return;
+            }
+            $hello_ok = 1;
+
+            $r->command('CLIENT', 'TRACKING', 'ON', 'BCAST', sub {
+                my ($res, $err) = @_;
+                if ($err) {
+                    $r->disconnect;
+                    EV::break;
+                    return;
+                }
+
+                $r->get('push:exception:key', sub {
+                    my $r2 = EV::Hiredis->new(path => $connect_info{sock});
+                    $r2->set('push:exception:key', 'modified', sub {
+                        $r2->disconnect;
+                        my $t; $t = EV::timer 0.2, 0, sub {
+                            undef $t;
+                            $r->on_push(undef);
+                            $r->disconnect;
+                            EV::break;
+                        };
+                    });
+                });
+            });
+        });
+    });
+
+    skip 'RESP3 not available', 2 unless $hello_ok;
+
+    ok scalar(@warnings) > 0, 'warning emitted for exception in push handler';
+    like $warnings[0], qr/exception in push handler/, 'warning message is correct';
 }
 
 done_testing;

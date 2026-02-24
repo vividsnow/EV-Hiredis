@@ -12,3 +12,4 @@ MYMETA.*
 /lib/EV/Hiredis.c
 /lib/EV/Hiredis.o
 /lib/EV/Hiredis.xs
+CLAUDE.md

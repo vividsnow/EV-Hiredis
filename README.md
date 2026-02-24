@@ -32,9 +32,9 @@ EV::Hiredis - Asynchronous redis client using hiredis and EV
 
 # DESCRIPTION
 
-EV::Hiredis is a asynchronous client for Redis using hiredis and [EV](https://metacpan.org/pod/EV) as backend.
+EV::Hiredis is an asynchronous client for Redis using hiredis and [EV](https://metacpan.org/pod/EV) as backend.
 
-This module connected to [EV](https://metacpan.org/pod/EV) with C-Level interface so that it runs faster.
+This module connects to [EV](https://metacpan.org/pod/EV) with C-level interface so that it runs faster.
 
 # FEATURES
 
@@ -93,7 +93,7 @@ Available `%options` are:
 
     Command timeout.
 
-- **loop** => 'EV::loop'
+- **loop** => 'EV::Loop'
 
     EV loop for running this instance. Default is `EV::default_loop`.
 
@@ -102,6 +102,8 @@ Available `%options` are:
 - **on\_error** => $cb->($errstr)
 
     Error callback will be called when a connection level error occurs.
+    If not provided (or `undef`), a default handler that calls `die` is installed.
+    To have no error handler, call `$obj->on_error(undef)` after construction.
 
     This callback can be set by `$obj->on_error($cb)` method any time.
 
@@ -135,6 +137,7 @@ Available `%options` are:
 - **max\_reconnect\_attempts** => $num
 
     Maximum number of reconnection attempts. 0 means unlimited. Default is 0.
+    Negative values are treated as 0 (unlimited).
 
 ### Flow Control
 
@@ -212,6 +215,14 @@ Requires TLS support compiled in (auto-detected at build time via OpenSSL). Chec
 
     Server name for SNI.
 
+- **tls\_capath** => 'Str'
+
+    Path to a directory containing CA certificate files (hashed filenames). Alternative to `tls_ca`.
+
+- **tls\_verify** => $bool
+
+    Enable or disable TLS peer verification. Default is true. Set to false for self-signed certificates.
+
 All parameters are optional.
 
 If parameters about connection (host&port or path) is not passed, you should call `connect` or `connect_unix` method by hand to connect to redis-server.
@@ -246,9 +257,16 @@ is equivalent to:
 
     $redis->get('foo', sub { ... });
 
+**Note:** Calling `command()` while not connected will croak, unless automatic
+reconnection is active (reconnect timer running). In that case, commands are
+automatically queued and sent after successful reconnection. Queued commands
+respect `waiting_timeout` if set.
+
 ## disconnect
 
-Disconnect from redis-server. This method is usable for exiting event loop.
+Disconnect from redis-server. Safe to call when already disconnected (no-op).
+Stops any pending reconnect timer. When called while already disconnected, also
+clears any waiting commands (e.g., preserved by `resume_waiting_on_reconnect`).
 
 ## is\_connected
 
@@ -260,12 +278,18 @@ Class method. Returns true (1) if the module was built with TLS support, false (
 
 ## reconnect($enable, $delay\_ms, $max\_attempts)
 
-Configure automatic reconnection.
+Configure automatic reconnection. `$delay_ms` defaults to 1000 (1 second).
+`$max_attempts` defaults to 0 (unlimited).
 
-    $redis->reconnect(1);                    # enable with defaults
+    $redis->reconnect(1);                    # enable with defaults (1s delay, unlimited)
+    $redis->reconnect(1, 0);                 # enable with immediate reconnect
     $redis->reconnect(1, 2000);              # enable with 2 second delay
     $redis->reconnect(1, 1000, 5);           # enable with 1s delay, max 5 attempts
     $redis->reconnect(0);                    # disable
+
+## reconnect\_enabled
+
+Returns true (1) if automatic reconnection is enabled, false (0) otherwise.
 
 ## skip\_waiting
 
@@ -290,6 +314,76 @@ Set disconnect callback. With `undef` or without arguments, clears the handler.
 ## on\_push(\[$cb->($reply)\])
 
 Set RESP3 push callback for server-initiated messages (Redis 6.0+).
+
+## connect\_timeout(\[$ms\])
+
+Get or set the connection timeout in milliseconds. Returns the current value, or undef if not set.
+
+## command\_timeout(\[$ms\])
+
+Get or set the command timeout in milliseconds. Returns the current value, or undef if not set.
+When changed while connected, takes effect immediately.
+
+## pending\_count
+
+Returns the number of commands sent to Redis awaiting responses.
+Persistent commands (subscribe, psubscribe, ssubscribe, monitor) are not
+included in this count.
+When called from inside a command callback, the count includes the
+current command (it is decremented after the callback returns).
+
+## waiting\_count
+
+Returns the number of commands queued locally (not yet sent to Redis).
+
+## max\_pending(\[$limit\])
+
+Get or set the maximum number of concurrent commands sent to Redis.
+Persistent commands (subscribe, psubscribe, ssubscribe, monitor) are not
+subject to this limit.
+0 means unlimited (default).
+
+## waiting\_timeout(\[$ms\])
+
+Get or set the maximum time in milliseconds a command can wait in the local queue.
+0 means unlimited (default).
+
+## resume\_waiting\_on\_reconnect(\[$bool\])
+
+Get or set whether waiting commands are preserved on disconnect and resumed after reconnection.
+Default is false.
+
+## priority(\[$num\])
+
+Get or set the libev watcher priority. Range: -2 to +2, default 0. Values outside this range are clamped.
+
+## keepalive(\[$seconds\])
+
+Get or set TCP keepalive interval. 0 means disabled (default).
+
+## prefer\_ipv4(\[$bool\])
+
+Get or set IPv4 preference for DNS resolution.
+
+## prefer\_ipv6(\[$bool\])
+
+Get or set IPv6 preference for DNS resolution.
+
+## source\_addr(\[$addr\])
+
+Get or set the local source address to bind to. Pass `undef` to clear.
+
+## tcp\_user\_timeout(\[$ms\])
+
+Get or set TCP\_USER\_TIMEOUT in milliseconds (Linux-specific). 0 means OS default.
+
+## cloexec(\[$bool\])
+
+Get or set SOCK\_CLOEXEC on the socket. Enabled by default.
+
+## reuseaddr(\[$bool\])
+
+Get or set SO\_REUSEADDR on the socket. Disabled by default.
 
 # RECONNECTION EXAMPLE
 

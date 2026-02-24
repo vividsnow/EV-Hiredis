@@ -358,6 +358,38 @@ $redis_server = Test::RedisServer->new( conf => { port => $port });
     is $r->is_connected, 0, 'not connected after disconnect in on_connect';
 }
 
+# Test: disconnect() from inside a reply callback (deferred disconnect path)
+{
+    my @results;
+    my $disconnect_called = 0;
+    my $r = EV::Hiredis->new(
+        on_error => sub { },
+        on_disconnect => sub { $disconnect_called++ },
+    );
+    $r->connect('127.0.0.1', $port);
+
+    $r->set('dc_reply_1', 'val1', sub {
+        my ($res, $err) = @_;
+        push @results, ['cmd1', $res, $err];
+        $r->disconnect;
+    });
+    $r->set('dc_reply_2', 'val2', sub {
+        my ($res, $err) = @_;
+        push @results, ['cmd2', $res, $err];
+    });
+    $r->set('dc_reply_3', 'val3', sub {
+        my ($res, $err) = @_;
+        push @results, ['cmd3', $res, $err];
+    });
+
+    EV::run;
+
+    is scalar(@results), 3, 'all 3 callbacks invoked after disconnect in callback';
+    is $results[0][1], 'OK', 'first command succeeded before deferred disconnect';
+    is $disconnect_called, 1, 'disconnect callback fired once';
+    is $r->is_connected, 0, 'no longer connected after deferred disconnect';
+}
+
 # Test: constructor rejects both host and path
 {
     eval {

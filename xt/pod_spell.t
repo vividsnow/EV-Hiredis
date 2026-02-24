@@ -27,6 +27,7 @@ SSL
 ssl
 SNI
 keepalive
+keepalives
 IPv4
 IPv6
 NAT
@@ -41,3 +42,5 @@ exec
 multi
 homed
 unacknowledged
+psubscribe
+ssubscribe

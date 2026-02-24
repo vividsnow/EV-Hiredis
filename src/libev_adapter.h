@@ -19,7 +19,6 @@ typedef struct redisLibevEvents {
     int reading, writing, timing;
     ev_io rev, wev;
     ev_timer timer;
-    int priority;
 } redisLibevEvents;
 
 static void redisLibevReadEvent(EV_P_ ev_io *watcher, int revents) {
@@ -49,7 +48,6 @@ static void redisLibevAddRead(void *privdata) {
     struct ev_loop *loop;
     if (e == NULL) return;
     loop = e->loop;
-    ((void)loop);
     if (loop == NULL) return;
     if (!e->reading) {
         e->reading = 1;
@@ -62,7 +60,6 @@ static void redisLibevDelRead(void *privdata) {
     struct ev_loop *loop;
     if (e == NULL) return;
     loop = e->loop;
-    ((void)loop);
     if (e->reading) {
         e->reading = 0;
         if (loop != NULL) ev_io_stop(loop, &e->rev);
@@ -74,7 +71,6 @@ static void redisLibevAddWrite(void *privdata) {
     struct ev_loop *loop;
     if (e == NULL) return;
     loop = e->loop;
-    ((void)loop);
     if (loop == NULL) return;
     if (!e->writing) {
         e->writing = 1;
@@ -87,7 +83,6 @@ static void redisLibevDelWrite(void *privdata) {
     struct ev_loop *loop;
     if (e == NULL) return;
     loop = e->loop;
-    ((void)loop);
     if (e->writing) {
         e->writing = 0;
         if (loop != NULL) ev_io_stop(loop, &e->wev);
@@ -99,7 +94,6 @@ static void redisLibevStopTimer(void *privdata) {
     struct ev_loop *loop;
     if (e == NULL) return;
     loop = e->loop;
-    ((void)loop);
     if (e->timing) {
         e->timing = 0;
         if (loop != NULL) ev_timer_stop(loop, &e->timer);
@@ -158,15 +152,9 @@ static void redisLibevSetTimeout(void *privdata, struct timeval tv) {
     struct ev_loop *loop;
     if (e == NULL) return;
     loop = e->loop;
-    ((void)loop);
     if (loop == NULL) return;
 
-    if (!e->timing) {
-        e->timing = 1;
-        ev_init(&e->timer, redisLibevTimeout);
-        e->timer.data = (void*)e;
-    }
-
+    e->timing = 1;
     e->timer.repeat = tv.tv_sec + tv.tv_usec / 1000000.00;
     ev_timer_again(loop, &e->timer);
 }
@@ -181,16 +169,13 @@ static int redisLibevAttach(EV_P_ redisAsyncContext *ac) {
 
     /* Create container for context and r/w events */
     Newx(e, 1, redisLibevEvents);
-    if (e == NULL)
-        return REDIS_ERR;
     e->context = ac;
 #if EV_MULTIPLICITY
     e->loop = loop;
 #else
-    e->loop = NULL;
+#error "EV_MULTIPLICITY is required for EV::Hiredis libev adapter"
 #endif
     e->reading = e->writing = e->timing = 0;
-    e->priority = 0;
     e->rev.data = (void*)e;
     e->wev.data = (void*)e;
 
@@ -220,9 +205,7 @@ static void redisLibevSetPriority(redisAsyncContext *ac, int priority) {
     if (e == NULL) return;
 
     loop = e->loop;
-    ((void)loop);
     if (loop == NULL) return;
-    e->priority = priority;
 
     /* Stop watchers, set priority, restart if they were running */
     if (e->reading) {

@@ -17,13 +17,13 @@ sub new {
     Carp::croak("Cannot specify both 'host' and 'path'")
         if exists $args{host} && exists $args{path};
 
-    my $loop = $args{loop} || EV::default_loop;
+    my $loop = $args{loop} // EV::default_loop;
     my $self = $class->_new($loop);
 
-    $self->on_error($args{on_error} || sub { die @_ });
-    $self->on_connect($args{on_connect}) if $args{on_connect};
-    $self->on_disconnect($args{on_disconnect}) if $args{on_disconnect};
-    $self->on_push($args{on_push}) if $args{on_push};
+    $self->on_error($args{on_error} // sub { die @_ });
+    $self->on_connect($args{on_connect}) if exists $args{on_connect};
+    $self->on_disconnect($args{on_disconnect}) if exists $args{on_disconnect};
+    $self->on_push($args{on_push}) if exists $args{on_push};
     $self->connect_timeout($args{connect_timeout}) if defined $args{connect_timeout};
     $self->command_timeout($args{command_timeout}) if defined $args{command_timeout};
     $self->max_pending($args{max_pending}) if defined $args{max_pending};
@@ -31,19 +31,19 @@ sub new {
     $self->resume_waiting_on_reconnect($args{resume_waiting_on_reconnect}) if defined $args{resume_waiting_on_reconnect};
     $self->priority($args{priority}) if defined $args{priority};
     $self->keepalive($args{keepalive}) if defined $args{keepalive};
-    $self->prefer_ipv4($args{prefer_ipv4}) if $args{prefer_ipv4};
-    $self->prefer_ipv6($args{prefer_ipv6}) if $args{prefer_ipv6};
+    $self->prefer_ipv4($args{prefer_ipv4}) if exists $args{prefer_ipv4};
+    $self->prefer_ipv6($args{prefer_ipv6}) if exists $args{prefer_ipv6};
     $self->source_addr($args{source_addr}) if defined $args{source_addr};
     $self->tcp_user_timeout($args{tcp_user_timeout}) if defined $args{tcp_user_timeout};
     $self->cloexec($args{cloexec}) if exists $args{cloexec};
-    $self->reuseaddr($args{reuseaddr}) if $args{reuseaddr};
+    $self->reuseaddr($args{reuseaddr}) if exists $args{reuseaddr};
 
     # Configure reconnect if specified
     if ($args{reconnect}) {
         $self->reconnect(
             1,
-            $args{reconnect_delay} || 1000,
-            $args{max_reconnect_attempts} || 0
+            $args{reconnect_delay} // 1000,
+            $args{max_reconnect_attempts} // 0
         );
     }
 
@@ -134,9 +134,9 @@ EV::Hiredis - Asynchronous redis client using hiredis and EV
 
 =head1 DESCRIPTION
 
-EV::Hiredis is a asynchronous client for Redis using hiredis and L<EV> as backend.
+EV::Hiredis is an asynchronous client for Redis using hiredis and L<EV> as backend.
 
-This module connected to L<EV> with C-Level interface so that it runs faster.
+This module connects to L<EV> with C-level interface so that it runs faster.
 
 =head1 ANYEVENT INTEGRATION
 
@@ -181,6 +181,9 @@ UNIX socket path to connect. Mutually exclusive with C<host>.
 =item * on_error => $cb->($errstr)
 
 Error callback will be called when a connection level error occurs.
+If not provided (or C<undef>), a default handler that calls C<die> is
+installed. To have no error handler, call C<< $obj->on_error(undef) >>
+after construction.
 
 This callback can be set by C<< $obj->on_error($cb) >> method any time.
 
@@ -241,6 +244,7 @@ Delay between reconnection attempts. Default is 1000 (1 second).
 =item * max_reconnect_attempts => $num
 
 Maximum number of reconnection attempts. 0 means unlimited. Default is 0.
+Negative values are treated as 0 (unlimited).
 
 =item * priority => $num
 
@@ -321,7 +325,7 @@ Enable or disable TLS peer verification. Default is true (verify).
 Set to false to accept self-signed certificates (not recommended for
 production).
 
-=item * loop => 'EV::loop',
+=item * loop => 'EV::Loop',
 
 EV loop for running this instance. Default is C<EV::default_loop>.
 
@@ -361,9 +365,26 @@ is equivalent to:
 
     $redis->get('foo', sub { ... });
 
+B<Note:> Calling C<command()> while not connected will croak with
+"connection required before calling command", unless automatic reconnection
+is active (reconnect timer running). In that case, commands are
+automatically queued and sent after successful reconnection. Queued
+commands respect C<waiting_timeout> if set.
+
+B<Pub/Sub note:> For C<subscribe>, C<psubscribe>, and C<ssubscribe>, the
+callback is persistent and receives all messages. For C<unsubscribe>,
+C<punsubscribe>, and C<sunsubscribe>, the confirmation is delivered through
+the original subscribe callback (this is hiredis behavior). The unsubscribe
+command's own callback will only fire with a disconnect error when the
+connection closes.
+
 =head2 disconnect
 
-Disconnect from redis-server. This method is usable for exiting event loop.
+Disconnect from redis-server. Safe to call when already disconnected (no-op).
+Stops any pending reconnect timer, so explicit disconnect prevents automatic
+reconnection. When called while already disconnected, also clears any
+waiting commands (e.g., preserved by C<resume_waiting_on_reconnect>).
+This method is usable for exiting event loop.
 
 =head2 is_connected
 
@@ -395,7 +416,9 @@ Set error callback. With a CODE reference argument, replaces the handler
 and returns the new handler. With C<undef> or without arguments, clears
 the handler and returns undef.
 
-B<Note:> There is no way to read the current handler without clearing it.
+B<Note:> Calling without arguments clears the handler. There is no way to
+read the current handler without clearing it. This applies to all handler
+methods (C<on_error>, C<on_connect>, C<on_disconnect>, C<on_push>).
 
 =head2 on_connect([$cb->()])
 
@@ -416,7 +439,7 @@ Set RESP3 push callback for server-initiated messages (Redis 6.0+).
 The callback receives the decoded push message as an array reference.
 With a CODE reference argument, replaces the handler and returns the new
 handler. With C<undef> or without arguments, clears the handler and
-returns undef. Can be set before or after connecting.
+returns undef. When changed while connected, takes effect immediately.
 
     $redis->on_push(sub {
         my ($msg) = @_;
@@ -427,10 +450,14 @@ returns undef. Can be set before or after connecting.
 
 Configure automatic reconnection.
 
-    $redis->reconnect(1);                    # enable with defaults
+    $redis->reconnect(1);                    # enable with defaults (1s delay, unlimited)
+    $redis->reconnect(1, 0);                 # enable with immediate reconnect
     $redis->reconnect(1, 2000);              # enable with 2 second delay
     $redis->reconnect(1, 1000, 5);           # enable with 1s delay, max 5 attempts
     $redis->reconnect(0);                    # disable
+
+C<$delay_ms> defaults to 1000 (1 second). 0 means immediate reconnect.
+C<$max_attempts> defaults to 0 (unlimited).
 
 When enabled, the client will automatically attempt to reconnect on connection
 failure or unexpected disconnection. Intentional C<disconnect()> calls will
@@ -443,6 +470,10 @@ Returns true (1) if automatic reconnection is enabled, false (0) otherwise.
 =head2 pending_count
 
 Returns the number of commands sent to Redis awaiting responses.
+Persistent commands (subscribe, psubscribe, ssubscribe, monitor) are not
+included in this count.
+When called from inside a command callback, the count includes the
+current command (it is decremented after the callback returns).
 
 =head2 waiting_count
 
@@ -452,6 +483,8 @@ These are commands that exceeded the C<max_pending> limit.
 =head2 max_pending($limit)
 
 Get or set the maximum number of concurrent commands sent to Redis.
+Persistent commands (subscribe, psubscribe, ssubscribe, monitor) are not
+subject to this limit.
 0 means unlimited (default). When the limit is reached, additional commands
 are queued locally and sent as responses arrive.
 
@@ -459,7 +492,7 @@ are queued locally and sent as responses arrive.
 
 Get or set the maximum time in milliseconds a command can wait in the local queue.
 Commands exceeding this timeout are cancelled with "waiting timeout" error.
-0 means unlimited (default).
+0 means unlimited (default). Returns the current value as an integer (0 when unset).
 
 =head2 resume_waiting_on_reconnect($bool)
 
@@ -483,8 +516,9 @@ Can be changed at any time, including while connected.
 
 Get or set the TCP keepalive interval in seconds. When set, the OS sends
 periodic probes on idle connections to detect dead peers. 0 means disabled
-(default). Can be set before or after connecting. Takes effect on the next
-connection (or immediately if already connected).
+(default). When set to a positive value while connected, takes effect
+immediately. Setting to 0 while connected records the preference for future
+connections but does not disable keepalives on the current socket.
 
 =head2 prefer_ipv4($bool)
 
@@ -529,9 +563,10 @@ with C<(undef, "skipped")>. In-flight commands continue normally.
 
 =head2 skip_pending
 
-Cancel all pending and waiting command callbacks. Each callback is invoked
-with C<(undef, "skipped")>. Waiting commands are cancelled immediately;
-pending commands are marked as skipped and cleaned up when Redis responds.
+Cancel all pending and waiting command callbacks. Each Perl callback is
+invoked immediately with C<(undef, "skipped")>. For pending commands,
+the internal hiredis tracking entry remains until a reply arrives (which
+is then discarded); no second callback fires.
 
 =head2 can($method)
 
@@ -541,9 +576,10 @@ Methods installed via AUTOLOAD (Redis commands) will return true after first cal
 =head1 DESTRUCTION BEHAVIOR
 
 When an EV::Hiredis object is destroyed (goes out of scope or is explicitly
-undefined) while commands are still pending or waiting, the underlying hiredis
-library triggers a disconnect which invokes all pending and waiting callbacks
-with an error. This is hiredis behavior and ensures callbacks are not orphaned.
+undefined) while commands are still pending or waiting, hiredis invokes all
+pending command callbacks with a disconnect error, and EV::Hiredis invokes
+all waiting queue callbacks with C<"disconnected">. This ensures callbacks
+are not orphaned.
 
 For predictable cleanup, explicitly disconnect before destruction:
 
