@@ -7,7 +7,7 @@ use EV;
 
 BEGIN {
     use XSLoader;
-    our $VERSION = '0.09';
+    our $VERSION = '0.10';
     XSLoader::load __PACKAGE__, $VERSION;
 }
 
@@ -90,18 +90,6 @@ sub AUTOLOAD {
     no strict 'refs';
     *$method = $sub;
     goto $sub;
-}
-
-sub can {
-    my ($self, $method) = @_;
-
-    # Check for installed methods (including those installed by AUTOLOAD)
-    no strict 'refs';
-    my $code = *{"EV::Redis::$method"}{CODE};
-    return $code if $code;
-
-    # Fall back to SUPER::can for inherited methods
-    return $self->SUPER::can($method);
 }
 
 1;
@@ -384,8 +372,6 @@ is equivalent to:
 
     $redis->get('foo', sub { ... });
 
-    $redis->set('counter', 42);  # fire-and-forget via AUTOLOAD
-
 B<Note:> Calling C<command()> while not connected will croak with
 "connection required before calling command", unless automatic reconnection
 is active (reconnect timer running). In that case, commands are
@@ -407,7 +393,6 @@ from an active connection. When called while already disconnected, clears
 any waiting commands (e.g., preserved by C<resume_waiting_on_reconnect>),
 invoking their callbacks with a "disconnected" error (C<on_disconnect>
 does not fire in this case).
-This method is usable for exiting event loop.
 
 =head2 is_connected
 

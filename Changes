@@ -1,5 +1,9 @@
 Revision history for Perl extension EV::Redis
 
+0.10 2026-04-27
+     - Internal cleanups: const-correctness on disconnect callback,
+       cached OpenSSL detection, doc fixes
+
 0.09 2026-04-08
      - Add benchmarks section to POD
      - Add 19 practical examples in eg/
