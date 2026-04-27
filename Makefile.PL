@@ -169,11 +169,14 @@ WriteMakefile(
     },
 );
 
-# hiredis is built during Makefile.PL; provide a no-op rule
+# hiredis is built during Makefile.PL; provide a no-op rule.
+# Also make Redis.xs depend on src/EV__Redis.xs so editing the source
+# triggers a rebuild without re-running `perl Makefile.PL`.
 sub MY::postamble {
     my @targets;
     for my $lib (@myextlib) {
         push @targets, "$lib :\n\t\@echo \"$lib already built\"\n";
     }
+    push @targets, "Redis.xs : src/EV__Redis.xs\n\t\$(CP) src/EV__Redis.xs Redis.xs\n";
     return join "\n", @targets;
 }

@@ -7,7 +7,7 @@ use EV;
 
 BEGIN {
     use XSLoader;
-    our $VERSION = '0.10';
+    our $VERSION = '0.11';
     XSLoader::load __PACKAGE__, $VERSION;
 }
 
@@ -410,14 +410,16 @@ false (0) otherwise.
 
 =head2 connect_timeout([$ms])
 
-Get or set the connection timeout in milliseconds. Returns the current value,
-or undef if not set. Can also be set via constructor.
+Get or set the connection timeout in milliseconds. Pass C<0> to disable.
+Returns the current value, or undef if never set. Can also be set via
+constructor.
 
 =head2 command_timeout([$ms])
 
-Get or set the command timeout in milliseconds. Returns the current value,
-or undef if not set. Can also be set via constructor. When changed while
-connected, takes effect immediately on the active connection.
+Get or set the command timeout in milliseconds. Pass C<0> to disable.
+Returns the current value, or undef if never set. Can also be set via
+constructor. When changed while connected, takes effect immediately on
+the active connection.
 
 =head2 on_error([$cb->($errstr)])
 

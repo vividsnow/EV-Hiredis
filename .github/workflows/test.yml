@@ -104,8 +104,8 @@ jobs:
         uses: shogo82148/actions-setup-perl@v1
         with:
           perl-version: ${{ matrix.perl }}
-          install-modules-with: cpm
-          install-modules-args: --with-configure --with-test
+          install-modules-with: cpanm
+          install-modules-args: --with-configure --with-test --notest
 
       - name: Set up Redis ${{ matrix.redis }}
         uses: shogo82148/actions-setup-redis@v1

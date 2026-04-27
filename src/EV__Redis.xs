@@ -378,16 +378,14 @@ static void EV__redis_connect_cb(redisAsyncContext* c, int status);
 static void EV__redis_disconnect_cb(const redisAsyncContext* c, int status);
 static void EV__redis_push_cb(redisAsyncContext* ac, void* reply_ptr);
 static SV* EV__redis_decode_reply(redisReply* reply);
+/* Recursion limit for nested array/map/set replies. Bounds C-stack growth
+ * when decoding maliciously deep replies from an untrusted server. */
+#define EV_REDIS_MAX_REPLY_DEPTH 512
+static SV* decode_reply_depth(redisReply* reply, int depth);
 
 static void clear_connection_params(EV__Redis self) {
-    if (NULL != self->host) {
-        Safefree(self->host);
-        self->host = NULL;
-    }
-    if (NULL != self->path) {
-        Safefree(self->path);
-        self->path = NULL;
-    }
+    if (NULL != self->host) { Safefree(self->host); self->host = NULL; }
+    if (NULL != self->path) { Safefree(self->path); self->path = NULL; }
 }
 
 static void reconnect_timer_cb(EV_P_ ev_timer* w, int revents) {
@@ -655,8 +653,14 @@ static void EV__redis_disconnect_cb(const redisAsyncContext* c, int status) {
 
         /* Re-check: user's handler might have called connect() or reconnect()
          * establishing a new ac. If so, skip clearing cb_queue to avoid
-         * freeing new commands. ac_saved is also already handled or NULL. */
+         * freeing new commands; still honour resume_waiting_on_reconnect=0
+         * by clearing the old wait queue (its entries belong to the prior
+         * connection, not the new one). ac_saved is already handled or NULL. */
         if (self->ac != NULL && self->ac != c) {
+            if (!self->resume_waiting_on_reconnect) {
+                clear_wait_queue_sv(self, error_sv);
+                stop_waiting_timer(self);
+            }
             self->callback_depth--;
             check_destroyed(self);
             return;
@@ -665,8 +669,6 @@ static void EV__redis_disconnect_cb(const redisAsyncContext* c, int status) {
 
     remove_cb_queue_sv(self, error_sv);
 
-    /* Clear waiting queue unless we will actually reconnect and
-     * resume_waiting_on_reconnect is enabled. */
     will_reconnect = should_reconnect && !self->intentional_disconnect && self->reconnect;
     if (!self->resume_waiting_on_reconnect || was_intentional || !will_reconnect) {
         clear_wait_queue_sv(self, error_sv);
@@ -792,7 +794,7 @@ static int post_connect_setup(EV__Redis self, const char* err_prefix) {
     return REDIS_OK;
 }
 
-static SV* EV__redis_decode_reply(redisReply* reply) {
+static SV* decode_reply_depth(redisReply* reply, int depth) {
     SV* res;
 
     switch (reply->type) {
@@ -827,11 +829,17 @@ static SV* EV__redis_decode_reply(redisReply* reply) {
         case REDIS_REPLY_PUSH: {
             AV* av = newAV();
             size_t i;
+            if (depth >= EV_REDIS_MAX_REPLY_DEPTH) {
+                /* Stop recursing: an empty array placeholder bounds C-stack
+                 * usage against a hostile server replying with deep nesting. */
+                res = newRV_noinc((SV*)av);
+                break;
+            }
             if (reply->elements > 0) {
                 av_extend(av, (SSize_t)(reply->elements - 1));
                 for (i = 0; i < reply->elements; i++) {
                     if (NULL != reply->element[i]) {
-                        av_push(av, EV__redis_decode_reply(reply->element[i]));
+                        av_push(av, decode_reply_depth(reply->element[i], depth + 1));
                     }
                     else {
                         av_push(av, newSV(0));
@@ -843,12 +851,15 @@ static SV* EV__redis_decode_reply(redisReply* reply) {
         }
 
         default:
-            /* Unknown type, return undef */
             res = newSV(0);
             break;
     }
 
     return res;
+}
+
+static SV* EV__redis_decode_reply(redisReply* reply) {
+    return decode_reply_depth(reply, 0);
 }
 
 static void EV__redis_reply_cb(redisAsyncContext* c, void* reply, void* privdata) {
@@ -1542,6 +1553,11 @@ CODE:
         wt->argc = argc;
         wt->cb = SvREFCNT_inc(cb);
         wt->persist = persist;
+        /* Refresh ev_now: command() may be called outside an ev_run iteration
+         * (e.g. during initial setup), where the cached time is stale. Without
+         * this, queued_at reflects an old time base and a later expire check
+         * against the up-to-date ev_now would compute an inflated elapsed. */
+        ev_now_update(self->loop);
         wt->queued_at = ev_now(self->loop);
         ngx_queue_init(&wt->queue);
         ngx_queue_insert_tail(&self->wait_queue, &wt->queue);
